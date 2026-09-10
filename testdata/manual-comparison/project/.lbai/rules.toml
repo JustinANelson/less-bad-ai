@@ -1,0 +1,10 @@
+[archetype]
+name = "ports-and-adapters-go"
+version = "1"
+allowed_extensions = [".go"]
+
+[[boundaries]]
+name = "application-network-boundary"
+path_pattern = "internal/app/**"
+forbidden_imports = ["^net/http$"]
+hint = "Inject a small application-layer interface and put the net/http implementation under internal/adapters."

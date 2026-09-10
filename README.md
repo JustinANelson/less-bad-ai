@@ -1,6 +1,10 @@
 # less-bad-ai
 
-`less-bad-ai` (`lbai`) runs a coding agent inside a recoverable Git transaction. It snapshots the repository, lets a worker edit, checks the build and architectural rules, asks a reviewer to clean the result, commits verified changes, records a trace, and can restore the pre-run state.
+`less-bad-ai` (`lbai`) is a guardrail for solo and indie developers who want the
+convenience of autonomous coding agents without making every generated change a
+leap of faith. It runs an agent inside a recoverable Git transaction, checks the
+build and architectural rules, asks a reviewer to clean the result, commits
+verified changes, records a trace, and can restore the pre-run state.
 
 ## Build
 
@@ -114,6 +118,26 @@ arguments with spaces, which avoids shell-specific quoting surprises.
 On success, `lbai` creates a verified code commit followed by a memory commit. The second commit records `ARCHITECTURE.md`, `AI_CONTEXT.md`, `docs/decisions/LOG.md`, and `.lbai/traces/<timestamp>_<code-sha>.json`. This two-commit protocol avoids the impossible requirement for a commit to contain its own SHA while keeping `lbai undo` atomic from the developer's perspective.
 
 The final fixed-width ASCII summary reports touched module directories, checked invariants, review outcome, commit, and undo command. `lbai ui` renders the same run as an embedded SVG dependency graph without external browser assets.
+
+## Manual A/B verification
+
+Run a deterministic one-shot comparison of the same project and prompt with and
+without LBAI:
+
+```powershell
+.\scripts\manual-compare.ps1
+```
+
+To use an installed coding agent instead of the deterministic stand-in:
+
+```powershell
+.\scripts\manual-compare.ps1 -Mode live -Agent codex
+```
+
+Both projects are cloned from one seed commit. Results, transcripts, and a
+comparison report are written beneath the ignored `.manual-eval/` directory.
+See [Manual A/B Verification](docs/manual-comparison.md) for expected results,
+supported agents, interpretation, and cleanup.
 
 ## Safety model
 

@@ -11,9 +11,10 @@ The shipped binary is `lbai`; `less-bad-ai` is an alias or installation-time sym
 Read these sources in order before changing behavior:
 
 1. The user's current request.
-2. The phase brief for the phase being implemented: `phase1.md` through `phase5.md`.
-3. `docs/agentic-workflow.md`, which resolves conflicts and fills gaps between phase briefs.
-4. Existing code, tests, and public CLI behavior.
+2. `GOAL.md`, which defines the intended user and product philosophy.
+3. The phase brief for the phase being implemented: `phase1.md` through `phase5.md`.
+4. `docs/agentic-workflow.md`, which resolves conflicts and fills gaps between phase briefs.
+5. Existing code, tests, and public CLI behavior.
 
 Do not silently reinterpret a phase requirement. If a requirement conflicts with an established public interface, preserve compatibility when practical and record the decision in `docs/decisions/LOG.md` once that file exists.
 
