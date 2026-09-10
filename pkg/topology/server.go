@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jnels/less-bad-ai/pkg/memory"
+	"github.com/JustinANelson/less-bad-ai/pkg/memory"
 )
 
 //go:embed static/index.html

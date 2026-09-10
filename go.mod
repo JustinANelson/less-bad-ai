@@ -1,4 +1,4 @@
-module github.com/jnels/less-bad-ai
+module github.com/JustinANelson/less-bad-ai
 
 go 1.26.0
 

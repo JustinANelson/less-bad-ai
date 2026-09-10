@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"os"
@@ -12,9 +13,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jnels/less-bad-ai/pkg/linter"
-	"github.com/jnels/less-bad-ai/pkg/memory"
-	"github.com/jnels/less-bad-ai/pkg/runner"
+	"github.com/JustinANelson/less-bad-ai/pkg/linter"
+	"github.com/JustinANelson/less-bad-ai/pkg/memory"
+	"github.com/JustinANelson/less-bad-ai/pkg/runner"
 )
 
 func TestScanRegressionsAllowsLegacyViolationButRejectsNewOne(t *testing.T) {
@@ -125,6 +126,67 @@ func TestInitWritesDiscoveredConfiguration(t *testing.T) {
 	}
 }
 
+func TestSetupAndDoctorPrepareFreshProject(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/fresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	discover := func(string) (runner.Config, error) {
+		return runner.Config{Worker: runner.AgentConfig{Type: "command", Command: []string{"git"}}}, nil
+	}
+	var output bytes.Buffer
+	a := app{out: &output, err: io.Discard, dir: root, discover: discover}
+	setup := a.setupCommand()
+	setup.SetContext(context.Background())
+	if err := setup.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "Ready. Run: lbai run") {
+		t.Fatalf("setup output:\n%s", output.String())
+	}
+	runGitTest(t, root, "rev-parse", "HEAD")
+	if _, err := os.Stat(filepath.Join(root, ".lbai", "config.toml")); err != nil {
+		t.Fatalf("setup config: %v", err)
+	}
+
+	output.Reset()
+	doctor := a.doctorCommand()
+	doctor.SetContext(context.Background())
+	if err := doctor.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"[PASS] git:", "[PASS] repository:", "[PASS] baseline:", "[PASS] agent:"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("doctor output omitted %q:\n%s", expected, output.String())
+		}
+	}
+}
+
+func TestDoctorJSONStillFailsWhenProjectIsNotReady(t *testing.T) {
+	var output bytes.Buffer
+	a := app{out: &output, err: io.Discard, dir: t.TempDir(), discover: func(string) (runner.Config, error) {
+		return runner.Config{Worker: runner.AgentConfig{Type: "command", Command: []string{"git"}}}, nil
+	}}
+	doctor := a.doctorCommand()
+	doctor.SetArgs([]string{"--json"})
+	doctor.SetContext(context.Background())
+	if err := doctor.Execute(); err == nil || !strings.Contains(err.Error(), "lbai setup") {
+		t.Fatalf("doctor error = %v", err)
+	}
+	var result struct {
+		Checks []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatalf("doctor JSON: %v\n%s", err, output.String())
+	}
+	if len(result.Checks) == 0 {
+		t.Fatal("doctor returned no checks")
+	}
+}
+
 func TestServeReportsPortConflict(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -150,6 +212,42 @@ func TestRunAcceptsAndJoinsUnquotedPromptWords(t *testing.T) {
 	}
 	if err := cmd.Args(cmd, nil); err == nil {
 		t.Fatal("run accepted an empty prompt")
+	}
+}
+
+func TestRunSuggestsSetupWhenBaselineIsMissing(t *testing.T) {
+	root := t.TempDir()
+	runGitTest(t, root, "init", "--quiet")
+	c := (&app{out: io.Discard, err: io.Discard, dir: root}).runCommand()
+	c.SetArgs([]string{"--dry-run", "make a change"})
+	c.SetContext(context.Background())
+	if err := c.Execute(); err == nil || !strings.Contains(err.Error(), "lbai setup") {
+		t.Fatalf("missing-baseline error = %v", err)
+	}
+}
+
+func TestVersionCommandSupportsTextAndJSON(t *testing.T) {
+	oldVersion, oldCommit, oldDate := Version, Commit, BuildDate
+	Version, Commit, BuildDate = "v1.2.3", "abc123", "2026-09-10T20:00:00Z"
+	t.Cleanup(func() { Version, Commit, BuildDate = oldVersion, oldCommit, oldDate })
+	var output bytes.Buffer
+	a := app{out: &output}
+	c := a.versionCommand()
+	if err := c.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "lbai v1.2.3") || !strings.Contains(got, "abc123") {
+		t.Fatalf("version output = %q", got)
+	}
+	output.Reset()
+	c = a.versionCommand()
+	c.SetArgs([]string{"--json"})
+	if err := c.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var info map[string]string
+	if err := json.Unmarshal(output.Bytes(), &info); err != nil || info["version"] != "v1.2.3" {
+		t.Fatalf("version JSON = %#v, %v", info, err)
 	}
 }
 

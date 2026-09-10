@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jnels/less-bad-ai/pkg/linter"
+	"github.com/JustinANelson/less-bad-ai/pkg/linter"
 )
 
 type Node struct {

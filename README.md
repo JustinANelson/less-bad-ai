@@ -6,23 +6,69 @@ leap of faith. It runs an agent inside a recoverable Git transaction, checks the
 build and architectural rules, asks a reviewer to clean the result, commits
 verified changes, records a trace, and can restore the pre-run state.
 
-## Build
+## Install
 
-Go 1.23 or newer is required.
+After the first tagged GitHub release is published, prebuilt binaries will not
+require Go. On Windows PowerShell:
 
-```text
+```powershell
+irm https://raw.githubusercontent.com/JustinANelson/less-bad-ai/main/install.ps1 | iex
+```
+
+On macOS or Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/JustinANelson/less-bad-ai/main/install.sh | sh
+```
+
+Both installers verify the release archive checksum and install the `lbai` and
+`less-bad-ai` command names. Releases are produced for Intel and ARM systems.
+
+Until then, install the current working copy from source with Go 1.26 or newer:
+
+```powershell
+go install ./cmd/lbai
+```
+
+Or build without installing:
+
+```sh
 go build -o lbai ./cmd/lbai
 ```
 
-Install or copy the same binary as `less-bad-ai` if the long alias is desired.
+## Quick start
+
+Open the project you want LBAI to manage and run:
+
+```sh
+cd path/to/project
+lbai setup
+lbai run "add request validation"
+```
+
+`lbai setup` detects the installed coding agent and project checks, creates
+`.lbai/config.toml`, and makes a baseline commit when the project is not already
+committed to Git. It refuses to baseline common secret files such as `.env`,
+private keys, and credential files. Add those files to `.gitignore`; use
+`--allow-sensitive` only when committing them is intentional.
+
+Check readiness at any time:
+
+```sh
+lbai doctor
+```
+
+Projects that already have an initial Git commit and a supported agent can skip
+setup entirely: `lbai run "describe the change"` uses read-only automatic
+discovery. Run `lbai version` to inspect an installed build.
 
 ## Configure
 
 Configuration is optional when a supported coding-agent CLI is installed. `lbai`
 auto-detects `codex`, `claude`, or `aider` (in that order), along with common
-Go, Rust, Maven, Gradle, Node, and Python test commands. Detection is read-only;
-run `lbai init` to inspect and persist the detected configuration before the
-first transaction.
+Go, Rust, Maven, Gradle, Node, and Python test commands. Detection is read-only.
+`lbai setup` is the recommended first-run experience; use `lbai init` only to
+persist configuration inside an existing Git repository without bootstrapping it.
 
 An explicit `.lbai/config.toml` always takes precedence. Copy
 `.lbai/config.example.toml` or edit the file produced by `lbai init` to select a
@@ -100,7 +146,8 @@ file or directory.
 ## Use
 
 ```text
-lbai init
+lbai setup
+lbai doctor
 lbai run "add request validation to the API"
 lbai status
 lbai lint --fix-hint

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jnels/less-bad-ai/pkg/cli"
+	"github.com/JustinANelson/less-bad-ai/pkg/cli"
 )
 
 func main() {

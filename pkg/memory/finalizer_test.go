@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jnels/less-bad-ai/pkg/gitengine"
+	"github.com/JustinANelson/less-bad-ai/pkg/gitengine"
 )
 
 func TestFinalizerCreatesLinkedCodeAndMetadataCommits(t *testing.T) {

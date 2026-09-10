@@ -16,11 +16,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jnels/less-bad-ai/pkg/gitengine"
-	"github.com/jnels/less-bad-ai/pkg/linter"
-	"github.com/jnels/less-bad-ai/pkg/memory"
-	"github.com/jnels/less-bad-ai/pkg/runner"
-	"github.com/jnels/less-bad-ai/pkg/topology"
+	"github.com/JustinANelson/less-bad-ai/pkg/gitengine"
+	"github.com/JustinANelson/less-bad-ai/pkg/linter"
+	"github.com/JustinANelson/less-bad-ai/pkg/memory"
+	"github.com/JustinANelson/less-bad-ai/pkg/onboarding"
+	"github.com/JustinANelson/less-bad-ai/pkg/runner"
+	"github.com/JustinANelson/less-bad-ai/pkg/topology"
 	"github.com/spf13/cobra"
 )
 
@@ -33,18 +34,103 @@ type app struct {
 func New() *cobra.Command {
 	cwd, _ := os.Getwd()
 	a := &app{out: os.Stdout, err: os.Stderr, dir: cwd}
-	root := &cobra.Command{Use: "lbai", Aliases: []string{"less-bad-ai"}, Short: "Run coding agents inside recoverable Git transactions", SilenceUsage: true, SilenceErrors: true}
+	root := &cobra.Command{Use: "lbai", Aliases: []string{"less-bad-ai"}, Short: "Run coding agents inside recoverable Git transactions", Version: Version, SilenceUsage: true, SilenceErrors: true}
 	root.SetOut(a.out)
 	root.SetErr(a.err)
-	root.AddCommand(a.initCommand(), a.runCommand(), a.undoCommand(), a.statusCommand(), a.lintCommand(), a.logCommand(), a.uiCommand())
+	root.AddCommand(a.versionCommand(), a.setupCommand(), a.doctorCommand(), a.initCommand(), a.runCommand(), a.undoCommand(), a.statusCommand(), a.lintCommand(), a.logCommand(), a.uiCommand())
 	return root
+}
+
+func (a *app) versionCommand() *cobra.Command {
+	var asJSON bool
+	c := &cobra.Command{Use: "version", Short: "Print version and build information", Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
+		info := struct {
+			Version string `json:"version"`
+			Commit  string `json:"commit"`
+			Date    string `json:"date"`
+		}{Version: Version, Commit: Commit, Date: BuildDate}
+		if asJSON {
+			return json.NewEncoder(a.out).Encode(info)
+		}
+		fmt.Fprintf(a.out, "lbai %s (commit %s, built %s)\n", info.Version, info.Commit, info.Date)
+		return nil
+	}}
+	c.Flags().BoolVar(&asJSON, "json", false, "write version information as JSON")
+	return c
+}
+
+func (a *app) setupCommand() *cobra.Command {
+	var allowSensitive, asJSON bool
+	var gitName, gitEmail string
+	c := &cobra.Command{Use: "setup", Aliases: []string{"bootstrap"}, Short: "Make the current project ready for lbai", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		result, err := onboarding.Setup(cmd.Context(), onboarding.Options{
+			Dir: a.dir, AllowSensitive: allowSensitive, GitName: gitName, GitEmail: gitEmail, Discover: a.discover,
+		})
+		if err != nil {
+			return err
+		}
+		if asJSON {
+			return json.NewEncoder(a.out).Encode(result)
+		}
+		if result.InitializedGit {
+			fmt.Fprintln(a.out, "[lbai] Initialized a Git repository.")
+		}
+		if result.CreatedConfig {
+			fmt.Fprintf(a.out, "[lbai] Saved detected configuration to %s.\n", result.ConfigPath)
+			if result.ConfigCommitted && !result.CreatedBaseline {
+				fmt.Fprintln(a.out, "[lbai] Committed the detected configuration.")
+			} else if !result.ConfigCommitted {
+				fmt.Fprintln(a.out, "[lbai] Existing work was left untouched; commit .lbai/config.toml when ready.")
+			}
+		}
+		if result.CreatedBaseline {
+			fmt.Fprintln(a.out, "[lbai] Created the initial project baseline commit.")
+		}
+		if result.IdentityFallback {
+			fmt.Fprintln(a.out, "[lbai] Note: configured a repository-local fallback Git identity; change it with git config user.name and user.email.")
+		}
+		fmt.Fprintf(a.out, "[lbai] Agent: %s\n", result.Agent)
+		fmt.Fprintf(a.out, "[lbai] Verification: %s\n", strings.Join(result.Checks, ", "))
+		fmt.Fprintln(a.out, "[lbai] Ready. Run: lbai run \"describe the change\"")
+		return nil
+	}}
+	c.Flags().BoolVar(&allowSensitive, "allow-sensitive", false, "allow possible secret files in a new baseline commit")
+	c.Flags().StringVar(&gitName, "git-name", "", "repository-local Git author name when one is not configured")
+	c.Flags().StringVar(&gitEmail, "git-email", "", "repository-local Git author email when one is not configured")
+	c.Flags().BoolVar(&asJSON, "json", false, "write setup result as JSON")
+	return c
+}
+
+func (a *app) doctorCommand() *cobra.Command {
+	var asJSON bool
+	c := &cobra.Command{Use: "doctor", Aliases: []string{"diagnose"}, Short: "Check whether this project is ready for lbai", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		result := onboarding.Diagnose(cmd.Context(), onboarding.Options{Dir: a.dir, Discover: a.discover})
+		if asJSON {
+			if err := json.NewEncoder(a.out).Encode(result); err != nil {
+				return err
+			}
+		} else {
+			for _, check := range result.Checks {
+				fmt.Fprintf(a.out, "[%s] %s: %s\n", strings.ToUpper(string(check.Status)), check.Name, check.Detail)
+				if check.Hint != "" {
+					fmt.Fprintf(a.out, "       %s\n", check.Hint)
+				}
+			}
+		}
+		if result.HasFailures() {
+			return errors.New("project is not ready; run `lbai setup` after addressing the checks above")
+		}
+		return nil
+	}}
+	c.Flags().BoolVar(&asJSON, "json", false, "write diagnostics as JSON")
+	return c
 }
 
 func (a *app) initCommand() *cobra.Command {
 	return &cobra.Command{Use: "init", Short: "Detect the project and write a starter configuration", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		root, err := gitengine.New(a.dir).Root(cmd.Context())
 		if err != nil {
-			return err
+			return fmt.Errorf("init requires an existing Git repository; run `lbai setup` instead: %w", err)
 		}
 		discover := a.discover
 		if discover == nil {
@@ -82,22 +168,25 @@ func (a *app) runCommand() *cobra.Command {
 		engine := gitengine.New(a.dir)
 		root, err := engine.Root(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("project is not ready; run `lbai setup`: %w", err)
 		}
 		var runCfg runner.Config
 		var rules linter.Config
 		if !dry {
 			runCfg, err = runner.LoadConfig(root)
 			if err != nil {
-				return err
+				return fmt.Errorf("load agent configuration: %w; run `lbai doctor` for setup guidance", err)
 			}
 			rules, err = linter.LoadConfig(root)
 			if err != nil {
-				return err
+				return fmt.Errorf("load architectural rules: %w; run `lbai doctor` for setup guidance", err)
 			}
 		}
 		plan, err := engine.Begin(ctx, gitengine.BeginOptions{Prompt: prompt, DryRun: dry})
 		if err != nil {
+			if strings.Contains(err.Error(), "initial commit") {
+				return fmt.Errorf("%w; run `lbai setup` to create the project baseline", err)
+			}
 			return err
 		}
 		fmt.Fprintf(a.out, "[lbai] Snapshotting HEAD (ref: %s)\n", plan.SnapshotRef)
