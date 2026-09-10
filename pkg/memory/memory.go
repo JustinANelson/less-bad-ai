@@ -30,7 +30,19 @@ type Trace struct {
 type Finalizer struct {
 	Root string
 	Now  func() time.Time
+	Git  GitRunner
 }
+
+type GitRunner interface {
+	Run(context.Context, string, ...string) ([]byte, error)
+}
+
+type ExecGitRunner struct{}
+
+func (ExecGitRunner) Run(ctx context.Context, root string, args ...string) ([]byte, error) {
+	return git(ctx, root, args...)
+}
+
 type FinalizeOptions struct{ Base, Prompt, WorkerSummary, ReviewerSummary, Message string }
 type FinalizeResult struct {
 	CodeCommit, MetadataCommit, TracePath string
@@ -39,11 +51,11 @@ type FinalizeResult struct {
 
 func (f Finalizer) Finalize(ctx context.Context, o FinalizeOptions) (FinalizeResult, error) {
 	var result FinalizeResult
-	files, err := gitLines(ctx, f.Root, "diff", "--name-only", o.Base, "--")
+	files, err := f.gitLines(ctx, "diff", "--name-only", o.Base, "--")
 	if err != nil {
 		return result, err
 	}
-	untracked, err := gitLines(ctx, f.Root, "ls-files", "--others", "--exclude-standard")
+	untracked, err := f.gitLines(ctx, "ls-files", "--others", "--exclude-standard")
 	if err != nil {
 		return result, err
 	}
@@ -52,7 +64,7 @@ func (f Finalizer) Finalize(ctx context.Context, o FinalizeOptions) (FinalizeRes
 	if len(files) == 0 {
 		return result, fmt.Errorf("agent produced no changes")
 	}
-	if _, err := git(ctx, f.Root, "add", "--all"); err != nil {
+	if _, err := f.runGit(ctx, "add", "--all"); err != nil {
 		return result, err
 	}
 	message := o.Message
@@ -62,17 +74,17 @@ func (f Finalizer) Finalize(ctx context.Context, o FinalizeOptions) (FinalizeRes
 			return result, err
 		}
 	}
-	traceID := fmt.Sprintf("lbai-%d", f.now().UTC().UnixNano())
+	timestamp := f.now().UTC()
+	traceID := fmt.Sprintf("lbai-%d", timestamp.UnixNano())
 	message += "\n\nWhy: Generated and verified through the less-bad-ai transaction pipeline.\nLBAI-Trace-ID: " + traceID
-	if _, err := git(ctx, f.Root, "commit", "-m", message); err != nil {
+	if _, err := f.runGit(ctx, "commit", "-m", message); err != nil {
 		return result, fmt.Errorf("commit verified changes: %w", err)
 	}
-	sha, err := gitText(ctx, f.Root, "rev-parse", "HEAD")
+	sha, err := f.gitText(ctx, "rev-parse", "HEAD")
 	if err != nil {
 		return result, err
 	}
 	result.CodeCommit = sha
-	timestamp := f.now().UTC()
 	name := timestamp.Format("20060102T150405Z") + "_" + short(sha) + ".json"
 	rel := filepath.ToSlash(filepath.Join(".lbai", "traces", name))
 	result.TracePath = rel
@@ -83,13 +95,13 @@ func (f Finalizer) Finalize(ctx context.Context, o FinalizeOptions) (FinalizeRes
 	if err := updateDocs(f.Root, trace); err != nil {
 		return result, err
 	}
-	if _, err := git(ctx, f.Root, "add", rel, "ARCHITECTURE.md", "AI_CONTEXT.md", filepath.ToSlash(filepath.Join("docs", "decisions", "LOG.md"))); err != nil {
+	if _, err := f.runGit(ctx, "add", rel, "ARCHITECTURE.md", "AI_CONTEXT.md", filepath.ToSlash(filepath.Join("docs", "decisions", "LOG.md"))); err != nil {
 		return result, err
 	}
-	if _, err := git(ctx, f.Root, "commit", "-m", fmt.Sprintf("docs(memory): record trace for %s", short(sha))); err != nil {
+	if _, err := f.runGit(ctx, "commit", "-m", fmt.Sprintf("docs(memory): record trace for %s", short(sha))); err != nil {
 		return result, fmt.Errorf("commit transaction memory: %w", err)
 	}
-	result.MetadataCommit, err = gitText(ctx, f.Root, "rev-parse", "HEAD")
+	result.MetadataCommit, err = f.gitText(ctx, "rev-parse", "HEAD")
 	return result, err
 }
 func (f Finalizer) now() time.Time {
@@ -97,6 +109,27 @@ func (f Finalizer) now() time.Time {
 		return f.Now()
 	}
 	return time.Now()
+}
+
+func (f Finalizer) runGit(ctx context.Context, args ...string) ([]byte, error) {
+	runner := f.Git
+	if runner == nil {
+		runner = ExecGitRunner{}
+	}
+	return runner.Run(ctx, f.Root, args...)
+}
+
+func (f Finalizer) gitText(ctx context.Context, args ...string) (string, error) {
+	b, err := f.runGit(ctx, args...)
+	return strings.TrimSpace(string(b)), err
+}
+
+func (f Finalizer) gitLines(ctx context.Context, args ...string) ([]string, error) {
+	s, err := f.gitText(ctx, args...)
+	if err != nil || s == "" {
+		return nil, err
+	}
+	return strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n"), nil
 }
 
 func writeTrace(root string, t Trace) error {
