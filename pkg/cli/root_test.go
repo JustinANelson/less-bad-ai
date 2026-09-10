@@ -144,6 +144,9 @@ func TestSetupAndDoctorPrepareFreshProject(t *testing.T) {
 	if !strings.Contains(output.String(), "Ready. Run: lbai run") {
 		t.Fatalf("setup output:\n%s", output.String())
 	}
+	if !strings.Contains(output.String(), "project checks will be detected after generation") {
+		t.Fatalf("setup did not explain late check detection:\n%s", output.String())
+	}
 	runGitTest(t, root, "rev-parse", "HEAD")
 	if _, err := os.Stat(filepath.Join(root, ".lbai", "config.toml")); err != nil {
 		t.Fatalf("setup config: %v", err)

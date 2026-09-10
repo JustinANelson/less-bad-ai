@@ -210,7 +210,7 @@ func Diagnose(ctx context.Context, opts Options) DoctorResult {
 		}
 		result.Checks = append(result.Checks, Check{Name: "configuration", Status: Pass, Detail: configMode})
 		if len(cfg.Checks) == 0 {
-			result.Checks = append(result.Checks, Check{Name: "verification", Status: Warn, Detail: "no project build or test command was detected", Hint: "Add [[checks]] to .lbai/config.toml."})
+			result.Checks = append(result.Checks, Check{Name: "verification", Status: Warn, Detail: "no project checks detected yet; they will be detected again after generation", Hint: "Optional: add [[checks]] to .lbai/config.toml to pin custom commands."})
 		} else {
 			missing := missingExecutables(cfg.Checks, result.Root, lookPath)
 			if len(missing) > 0 {

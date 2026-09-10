@@ -90,7 +90,11 @@ func (a *app) setupCommand() *cobra.Command {
 			fmt.Fprintln(a.out, "[lbai] Note: configured a repository-local fallback Git identity; change it with git config user.name and user.email.")
 		}
 		fmt.Fprintf(a.out, "[lbai] Agent: %s\n", result.Agent)
-		fmt.Fprintf(a.out, "[lbai] Verification: %s\n", strings.Join(result.Checks, ", "))
+		if len(result.Checks) == 1 && result.Checks[0] == "architecture" {
+			fmt.Fprintln(a.out, "[lbai] Verification: architecture; project checks will be detected after generation")
+		} else {
+			fmt.Fprintf(a.out, "[lbai] Verification: %s\n", strings.Join(result.Checks, ", "))
+		}
 		fmt.Fprintln(a.out, "[lbai] Ready. Run: lbai run \"describe the change\"")
 		return nil
 	}}
@@ -148,7 +152,7 @@ func (a *app) initCommand() *cobra.Command {
 		fmt.Fprintf(a.out, "[lbai] Worker: %s\n", strings.Join(cfg.Worker.Command, " "))
 		checks := cfg.Checks
 		if len(checks) == 0 {
-			fmt.Fprintln(a.out, "[lbai] Checks: none detected; configure [[checks]] to enforce project verification")
+			fmt.Fprintln(a.out, "[lbai] Checks: automatic after generation; add [[checks]] to pin custom commands")
 		} else {
 			for _, check := range checks {
 				fmt.Fprintf(a.out, "[lbai] Check %s: %s\n", check.Name, strings.Join(append([]string{check.Executable}, check.Args...), " "))

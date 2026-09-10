@@ -138,6 +138,11 @@ func TestDiagnoseReportsReadyProject(t *testing.T) {
 			t.Fatalf("missing passing %s check: %#v", name, result.Checks)
 		}
 	}
+	for _, check := range result.Checks {
+		if check.Name == "verification" && !strings.Contains(check.Detail, "detected again after generation") {
+			t.Fatalf("verification guidance = %#v", check)
+		}
+	}
 }
 
 func TestDiagnoseReportsActionableFreshDirectory(t *testing.T) {
