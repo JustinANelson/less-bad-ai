@@ -31,6 +31,27 @@ executable = "go"
 args = ["test", "./..."]
 ```
 
+Command providers edit the worktree directly. OpenAI-compatible HTTP providers must return one JSON object; free-form or Markdown-wrapped responses are rejected. Writes and deletes are confined to the repository, and `.git` plus LBAI runtime recovery state are protected.
+
+```json
+{
+  "summary": "Implemented request validation.",
+  "operations": [
+    {
+      "operation": "write",
+      "path": "pkg/api/validation.go",
+      "content": "package api\n"
+    },
+    {
+      "operation": "delete",
+      "path": "pkg/api/obsolete.go"
+    }
+  ]
+}
+```
+
+Each `write` operation supplies the complete new file content. Return an empty `operations` array when no edits are needed.
+
 Copy `.lbai/rules.example.toml` to `.lbai/rules.toml` to enforce project boundaries. With no rules file, linting is permissive.
 
 ## Use

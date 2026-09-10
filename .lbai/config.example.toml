@@ -1,4 +1,6 @@
 # Copy to .lbai/config.toml. Commands execute directly without a shell.
+# OpenAI-compatible providers return the structured file-operation JSON
+# documented in README.md; they do not edit the worktree directly.
 [worker]
 type = "command"
 command = ["claude", "-p", "--permission-mode", "acceptEdits"]
