@@ -37,32 +37,41 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/topology", s.topology)
 	mux.HandleFunc("/api/events", s.events)
 	mux.HandleFunc("/api/revert", s.revert)
-	mux.HandleFunc("/api/session", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]string{"token": s.Token}) })
+	mux.HandleFunc("/api/session", s.session)
 	static, _ := fs.Sub(assets, "static")
 	mux.Handle("/", http.FileServer(http.FS(static)))
 	return mux
 }
 func (s *Server) topology(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", 405)
+	if !allowLoopbackMethod(w, r, http.MethodGet) {
 		return
 	}
 	var modified []string
-	var prompt, summary string
+	var prompt, summary, review, status string
 	if traces, listErr := memory.List(s.Root, 1); listErr == nil && len(traces) == 1 {
-		modified, prompt, summary = traces[0].TouchedFiles, traces[0].UserPrompt, traces[0].WorkerSummary
+		modified = traces[0].TouchedFiles
+		prompt = sanitizeDisplayText(traces[0].UserPrompt, maxPromptDisplay)
+		summary = sanitizeDisplayText(traces[0].WorkerSummary, maxSummaryDisplay)
+		review = sanitizeDisplayText(traces[0].TechLeadModifications, maxSummaryDisplay)
+		status = "complete"
 	}
 	g, err := Build(s.Root, modified)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	g.Prompt, g.Summary = prompt, summary
+	g.Prompt, g.Summary, g.Review, g.Status = prompt, summary, review, status
 	writeJSON(w, g)
 }
+
+func (s *Server) session(w http.ResponseWriter, r *http.Request) {
+	if !allowLoopbackMethod(w, r, http.MethodGet) {
+		return
+	}
+	writeJSON(w, map[string]string{"token": s.Token})
+}
 func (s *Server) revert(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
+	if !allowLoopbackMethod(w, r, http.MethodPost) {
 		return
 	}
 	if origin := r.Header.Get("Origin"); origin != "" && !sameOrigin(origin, r.Host) {
@@ -87,6 +96,9 @@ func (s *Server) revert(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "reverted"})
 }
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	if !allowLoopbackMethod(w, r, http.MethodGet) {
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unavailable", 500)
@@ -129,7 +141,26 @@ func sameOrigin(origin, host string) bool {
 	if !strings.EqualFold(u.Host, host) {
 		return false
 	}
-	hostname := u.Hostname()
+	return isLoopbackHostname(u.Hostname())
+}
+
+func allowLoopbackMethod(w http.ResponseWriter, r *http.Request, method string) bool {
+	if r.Method != method {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return false
+	}
+	hostname := r.Host
+	if parsed, err := url.Parse("//" + r.Host); err == nil && parsed.Hostname() != "" {
+		hostname = parsed.Hostname()
+	}
+	if !isLoopbackHostname(hostname) {
+		http.Error(w, "loopback access required", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+func isLoopbackHostname(hostname string) bool {
 	if strings.EqualFold(hostname, "localhost") {
 		return true
 	}

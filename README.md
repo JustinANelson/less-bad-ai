@@ -69,11 +69,14 @@ lbai undo
 
 On success, `lbai` creates a verified code commit followed by a memory commit. The second commit records `ARCHITECTURE.md`, `AI_CONTEXT.md`, `docs/decisions/LOG.md`, and `.lbai/traces/<timestamp>_<code-sha>.json`. This two-commit protocol avoids the impossible requirement for a commit to contain its own SHA while keeping `lbai undo` atomic from the developer's perspective.
 
+The final fixed-width ASCII summary reports touched module directories, checked invariants, review outcome, commit, and undo command. `lbai ui` renders the same run as an embedded SVG dependency graph without external browser assets.
+
 ## Safety model
 
 - Existing dirty changes, including untracked files, are retained under a transaction-specific Git ref and restored after success or rollback.
 - Automatic rollback removes only files recorded as created by the active transaction unless `--hard` is supplied.
 - The dashboard listens on loopback only. Its rollback route requires POST, a same-origin request, and a per-process token.
-- Provider output and errors are size-limited. API credentials are read from a named environment variable and are never persisted in trace files.
+- Dashboard trace context is redacted and length-limited before it crosses the HTTP API boundary; full prompts remain in the versioned trace store.
+- Provider output and errors are size-limited, and authorization headers are not persisted. Prompts and summaries are committed to the trace store, so they should not contain secrets.
 
 See [the agentic workflow](docs/agentic-workflow.md) for phase contracts and design decisions.

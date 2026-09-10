@@ -25,6 +25,8 @@ type Graph struct {
 	Edges   []Edge `json:"edges"`
 	Prompt  string `json:"prompt,omitempty"`
 	Summary string `json:"summary,omitempty"`
+	Review  string `json:"review,omitempty"`
+	Status  string `json:"status,omitempty"`
 }
 
 func Build(root string, modified []string) (Graph, error) {
@@ -57,7 +59,7 @@ func Build(root string, modified []string) (Graph, error) {
 			return err
 		}
 		for _, imp := range imports {
-			if module == "" || !strings.HasPrefix(imp.Name, module) {
+			if module == "" || imp.Name != module && !strings.HasPrefix(imp.Name, module+"/") {
 				continue
 			}
 			target := strings.TrimPrefix(strings.TrimPrefix(imp.Name, module), "/")
