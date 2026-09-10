@@ -60,6 +60,19 @@ func TestDiscoverChecksUsesNodeLockfileAndScripts(t *testing.T) {
 	}
 }
 
+func TestDiscoverChecksUsesNPMRunForPackageScripts(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFixture(t, root, "package.json", `{"scripts":{"build":"vite build","lint":"eslint ."}}`)
+	checks := discoverChecks(root, lookupOnly("npm"))
+	want := []CheckConfig{
+		{Name: "build", Executable: "npm", Args: []string{"run", "build"}},
+		{Name: "lint", Executable: "npm", Args: []string{"run", "lint"}},
+	}
+	if !reflect.DeepEqual(checks, want) {
+		t.Fatalf("checks = %#v, want %#v", checks, want)
+	}
+}
+
 func TestConfigRejectsInvalidCheckGraph(t *testing.T) {
 	base := Config{Worker: AgentConfig{Type: "command", Command: []string{"agent"}}}
 	for _, checks := range [][]CheckConfig{

@@ -196,7 +196,11 @@ func discoverNodeChecks(root string, lookPath executableLookup) []CheckConfig {
 func nodeCheckConfigs(manager string, scripts []string) []CheckConfig {
 	checks := make([]CheckConfig, 0, len(scripts))
 	for _, script := range scripts {
-		checks = append(checks, CheckConfig{Name: script, Executable: manager, Args: []string{script}})
+		args := []string{script}
+		if manager == "npm" {
+			args = []string{"run", script}
+		}
+		checks = append(checks, CheckConfig{Name: script, Executable: manager, Args: args})
 	}
 	return checks
 }
