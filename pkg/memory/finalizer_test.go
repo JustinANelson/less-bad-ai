@@ -60,6 +60,23 @@ func TestFinalizerCreatesLinkedCodeAndMetadataCommits(t *testing.T) {
 	}
 }
 
+func TestExecGitRunnerDoesNotMixWarningsIntoSuccessfulOutput(t *testing.T) {
+	root, base := memoryGitFixture(t)
+	runMemoryGit(t, root, "config", "core.autocrlf", "true")
+	runMemoryGit(t, root, "config", "core.safecrlf", "warn")
+	if err := os.WriteFile(filepath.Join(root, "base.txt"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := (ExecGitRunner{}).Run(context.Background(), root, "diff", "--name-only", base, "--")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "base.txt" {
+		t.Fatalf("git stdout = %q, want only the changed path", got)
+	}
+}
+
 type failMetadataCommitRunner struct {
 	commits int
 }

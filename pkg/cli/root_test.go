@@ -26,6 +26,20 @@ func TestServeReportsPortConflict(t *testing.T) {
 	}
 }
 
+func TestRunAcceptsAndJoinsUnquotedPromptWords(t *testing.T) {
+	cmd := (&app{}).runCommand()
+	args := []string{"make", "it", "work"}
+	if err := cmd.Args(cmd, args); err != nil {
+		t.Fatalf("run rejected prompt words: %v", err)
+	}
+	if got := strings.Join(args, " "); got != "make it work" {
+		t.Fatalf("joined prompt = %q", got)
+	}
+	if err := cmd.Args(cmd, nil); err == nil {
+		t.Fatal("run accepted an empty prompt")
+	}
+}
+
 func TestRenderSummaryReportsModulesWithBoundedASCIIRows(t *testing.T) {
 	result := memory.FinalizeResult{
 		CodeCommit: "0123456789abcdef",

@@ -65,6 +65,10 @@ lbai ui --open
 lbai undo
 ```
 
+The prompt may be quoted as one argument or entered as trailing words (for example,
+`lbai run add request validation to the API`). `lbai` joins all trailing prompt
+arguments with spaces, which avoids shell-specific quoting surprises.
+
 `lbai run --dry-run "prompt"` plans the snapshot without changing files or refs. `lbai undo --hard` additionally removes all untracked files and should be used only when broad cleanup is intended.
 
 On success, `lbai` creates a verified code commit followed by a memory commit. The second commit records `ARCHITECTURE.md`, `AI_CONTEXT.md`, `docs/decisions/LOG.md`, and `.lbai/traces/<timestamp>_<code-sha>.json`. This two-commit protocol avoids the impossible requirement for a commit to contain its own SHA while keeping `lbai undo` atomic from the developer's perspective.

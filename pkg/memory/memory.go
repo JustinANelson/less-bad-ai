@@ -389,9 +389,12 @@ func fallback(s, d string) string {
 func git(ctx context.Context, root string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = root
-	b, err := cmd.CombinedOutput()
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	b, err := cmd.Output()
 	if err != nil {
-		return b, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(b)))
+		details := strings.TrimSpace(strings.TrimSpace(string(b)) + "\n" + stderr.String())
+		return b, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, details)
 	}
 	return b, nil
 }

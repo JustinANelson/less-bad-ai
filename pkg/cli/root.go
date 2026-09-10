@@ -43,8 +43,9 @@ func (a *app) runCommand() *cobra.Command {
 	var dry, skipReview, serve bool
 	var message, model string
 	var retries int
-	c := &cobra.Command{Use: "run <prompt>", Aliases: []string{"r", "exec"}, Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	c := &cobra.Command{Use: "run <prompt...>", Aliases: []string{"r", "exec"}, Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
+		prompt := strings.Join(args, " ")
 		engine := gitengine.New(a.dir)
 		root, err := engine.Root(ctx)
 		if err != nil {
@@ -62,7 +63,7 @@ func (a *app) runCommand() *cobra.Command {
 				return err
 			}
 		}
-		plan, err := engine.Begin(ctx, gitengine.BeginOptions{Prompt: args[0], DryRun: dry})
+		plan, err := engine.Begin(ctx, gitengine.BeginOptions{Prompt: prompt, DryRun: dry})
 		if err != nil {
 			return err
 		}
@@ -100,7 +101,7 @@ func (a *app) runCommand() *cobra.Command {
 			return text, nil
 		}}
 		pipeline := runner.Pipeline{Worker: worker, Reviewer: reviewer, Verifier: verify, Diff: runner.GitDiff{Root: root, Base: plan.Head}, MaxRetries: retries, SkipReview: skipReview, Rollback: func(ctx context.Context) error { _, e := engine.Undo(ctx, false); return e }, Progress: func(step, msg string) { fmt.Fprintf(a.out, "[lbai] [%s] %s\n", step, msg) }}
-		result, err := pipeline.Run(ctx, args[0])
+		result, err := pipeline.Run(ctx, prompt)
 		if err != nil {
 			return err
 		}
@@ -108,7 +109,7 @@ func (a *app) runCommand() *cobra.Command {
 			_, _ = engine.Undo(ctx, false)
 			return err
 		}
-		final, err := (memory.Finalizer{Root: root}).Finalize(ctx, memory.FinalizeOptions{Base: plan.Head, Prompt: args[0], WorkerSummary: result.WorkerSummary, ReviewerSummary: result.ReviewerSummary, Message: message})
+		final, err := (memory.Finalizer{Root: root}).Finalize(ctx, memory.FinalizeOptions{Base: plan.Head, Prompt: prompt, WorkerSummary: result.WorkerSummary, ReviewerSummary: result.ReviewerSummary, Message: message})
 		if err != nil {
 			_, rollbackErr := engine.Undo(ctx, false)
 			if rollbackErr != nil {
@@ -119,7 +120,11 @@ func (a *app) runCommand() *cobra.Command {
 		if err := engine.Complete(ctx); err != nil {
 			return err
 		}
-		printSummary(a.out, final, len(rules.Boundaries), result.ReviewerSummary)
+		reviewSummary := result.ReviewerSummary
+		if skipReview {
+			reviewSummary = "Skipped"
+		}
+		printSummary(a.out, final, len(rules.Boundaries), reviewSummary)
 		if serve {
 			return a.serve(ctx, root, 3141, true)
 		}
@@ -362,9 +367,12 @@ func hasWarnings(d []linter.Diagnostic) bool {
 func gitOutput(ctx context.Context, root string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = root
-	b, err := cmd.CombinedOutput()
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	b, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(b)))
+		details := strings.TrimSpace(strings.TrimSpace(string(b)) + "\n" + stderr.String())
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, details)
 	}
 	return b, nil
 }
