@@ -150,3 +150,23 @@ const legacy = require('real-require');
 		}
 	}
 }
+
+func TestRegressionsIgnoresLegacyViolationsAndLineMovement(t *testing.T) {
+	legacy := Diagnostic{Path: "pkg/service.go", Line: 4, Rule: "direction", Violation: "forbidden", Offender: "app/cmd/tool", Severity: "error", Hint: "old hint"}
+	newViolation := Diagnostic{Path: "pkg/service.go", Line: 9, Rule: "direction", Violation: "forbidden", Offender: "app/cmd/new", Severity: "error"}
+	current := []Diagnostic{
+		{Path: legacy.Path, Line: 20, Rule: legacy.Rule, Violation: legacy.Violation, Offender: legacy.Offender, Severity: legacy.Severity, Hint: "new hint"},
+		newViolation,
+	}
+	got := Regressions(current, []Diagnostic{legacy})
+	if len(got) != 1 || got[0] != newViolation {
+		t.Fatalf("regressions = %#v, want %#v", got, []Diagnostic{newViolation})
+	}
+}
+
+func TestScanSkipsDeletedPaths(t *testing.T) {
+	diagnostics, err := Scan(t.TempDir(), []string{"deleted.go"}, DefaultConfig())
+	if err != nil || len(diagnostics) != 0 {
+		t.Fatalf("Scan deleted path = %#v, %v", diagnostics, err)
+	}
+}

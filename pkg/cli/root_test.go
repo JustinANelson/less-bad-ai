@@ -5,12 +5,125 @@ import (
 	"context"
 	"io"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/jnels/less-bad-ai/pkg/linter"
 	"github.com/jnels/less-bad-ai/pkg/memory"
+	"github.com/jnels/less-bad-ai/pkg/runner"
 )
+
+func TestScanRegressionsAllowsLegacyViolationButRejectsNewOne(t *testing.T) {
+	root := t.TempDir()
+	runGitTest(t, root, "init", "--quiet")
+	runGitTest(t, root, "config", "user.name", "LBAI Test")
+	runGitTest(t, root, "config", "user.email", "lbai@example.invalid")
+	path := filepath.Join(root, "pkg", "service.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := "package service\nimport _ \"example.com/app/cmd/legacy\"\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, root, "add", ".")
+	runGitTest(t, root, "commit", "--quiet", "-m", "baseline")
+	cfg := linter.DefaultConfig()
+	cfg.Boundaries = []linter.Boundary{{Name: "direction", PathPattern: "pkg/**", ForbiddenImports: []string{`/cmd/`}}}
+	if err := os.WriteFile(path, []byte("package service\nimport (\n_ \"example.com/app/cmd/legacy\"\n_ \"example.com/app/cmd/new\"\n)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics, suppressed, err := scanRegressions(context.Background(), root, "HEAD", []string{"pkg/service.go"}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diagnostics) != 1 || diagnostics[0].Offender != "example.com/app/cmd/new" {
+		t.Fatalf("regressions = %#v", diagnostics)
+	}
+	if suppressed != 1 {
+		t.Fatalf("suppressed = %d, want 1", suppressed)
+	}
+}
+
+func TestLintDefaultReportsUnchangedBaselineWithoutFailing(t *testing.T) {
+	root := t.TempDir()
+	runGitTest(t, root, "init", "--quiet")
+	runGitTest(t, root, "config", "user.name", "LBAI Test")
+	runGitTest(t, root, "config", "user.email", "lbai@example.invalid")
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "pkg", "service.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := "package service\nimport _ \"example.com/app/cmd/legacy\"\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, root, "add", ".")
+	runGitTest(t, root, "commit", "--quiet", "-m", "baseline")
+	if err := os.WriteFile(path, []byte("// retained violation\n"+legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	cmd := (&app{out: &output, err: io.Discard, dir: root}).lintCommand()
+	cmd.SetContext(context.Background())
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "No new architectural violations (1 unchanged baseline violation(s))") {
+		t.Fatalf("lint output:\n%s", output.String())
+	}
+}
+
+func runGitTest(t *testing.T, root string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+	}
+}
+
+func TestInitWritesDiscoveredConfiguration(t *testing.T) {
+	root := t.TempDir()
+	git := exec.Command("git", "init", "--quiet", root)
+	if output, err := git.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	var output bytes.Buffer
+	a := app{out: &output, err: io.Discard, dir: root, discover: func(gotRoot string) (runner.Config, error) {
+		if gotRoot != root {
+			t.Fatalf("discovery root = %q, want %q", gotRoot, root)
+		}
+		return runner.Config{
+			Worker: runner.AgentConfig{Type: "command", Command: []string{"codex", "exec"}},
+			Checks: []runner.CheckConfig{
+				{Name: "test", Executable: "go", Args: []string{"test", "./..."}},
+				{Name: "vet", Executable: "go", Args: []string{"vet", "./..."}},
+			},
+		}, nil
+	}}
+	cmd := a.initCommand()
+	cmd.SetContext(context.Background())
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.LoadConfig(root); err != nil {
+		t.Fatalf("load initialized config: %v", err)
+	}
+	if !strings.Contains(output.String(), "Worker: codex exec") || !strings.Contains(output.String(), "Check test: go test ./...") || !strings.Contains(output.String(), "Check vet: go vet ./...") {
+		t.Fatalf("init output:\n%s", output.String())
+	}
+	if got := filepath.Join(root, ".lbai", "config.toml"); !strings.Contains(output.String(), got) {
+		t.Fatalf("init did not report %q:\n%s", got, output.String())
+	}
+}
 
 func TestServeReportsPortConflict(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

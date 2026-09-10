@@ -9,6 +9,12 @@ command = ["claude", "-p", "--permission-mode", "acceptEdits"]
 type = "command"
 command = ["claude", "-p", "--permission-mode", "acceptEdits"]
 
-[build]
+[[checks]]
+name = "test"
 executable = "go"
 args = ["test", "./..."]
+
+[[checks]]
+name = "vet"
+executable = "go"
+args = ["vet", "./..."]

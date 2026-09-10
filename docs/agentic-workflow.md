@@ -18,6 +18,28 @@ Do not build phase 5 handlers around placeholder phase 4 trace shapes, or phase 
 
 ## Cross-Phase Decisions
 
+### Zero-configuration discovery
+
+When `.lbai/config.toml` is absent, `lbai run` detects a supported local coding
+agent and a conventional project verification command without writing to the
+repository. Explicit configuration always wins. `lbai init` persists the same
+detected values for inspection and customization, and refuses to overwrite an
+existing configuration.
+
+When `.lbai/rules.toml` is absent, select only high-confidence rules inferred
+from project metadata. Compare changed-file diagnostics with the pre-run Git
+revision and fail only regressions, while making the count of unchanged legacy
+violations visible. An explicit path audit continues to report every violation.
+
+### Verification graph
+
+Represent project verification as named checks with explicit dependencies.
+Execute independent checks concurrently with bounded parallelism, but collect
+output and errors in stable name order. A failed check prevents its dependents
+from running. The legacy `[build]` configuration maps to one check; `[[checks]]`
+is the graph form, and the two forms cannot be combined. Architectural scanning
+is always an LBAI-owned graph node.
+
 ### CLI flag collision
 
 Both phase 1 and phase 3 assign `-m`: phase 1 to `--message`, phase 3 to `--model`. Cobra cannot assign the same shorthand twice on one command. Preserve the conventional and earlier public shorthand `-m` for `--message`; expose model selection as `--model` without a shorthand. If compatibility with a released implementation dictates otherwise, retain that behavior and document the deviation.

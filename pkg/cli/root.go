@@ -27,6 +27,7 @@ import (
 type app struct {
 	out, err io.Writer
 	dir      string
+	discover func(string) (runner.Config, error)
 }
 
 func New() *cobra.Command {
@@ -35,8 +36,40 @@ func New() *cobra.Command {
 	root := &cobra.Command{Use: "lbai", Aliases: []string{"less-bad-ai"}, Short: "Run coding agents inside recoverable Git transactions", SilenceUsage: true, SilenceErrors: true}
 	root.SetOut(a.out)
 	root.SetErr(a.err)
-	root.AddCommand(a.runCommand(), a.undoCommand(), a.statusCommand(), a.lintCommand(), a.logCommand(), a.uiCommand())
+	root.AddCommand(a.initCommand(), a.runCommand(), a.undoCommand(), a.statusCommand(), a.lintCommand(), a.logCommand(), a.uiCommand())
 	return root
+}
+
+func (a *app) initCommand() *cobra.Command {
+	return &cobra.Command{Use: "init", Short: "Detect the project and write a starter configuration", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		root, err := gitengine.New(a.dir).Root(cmd.Context())
+		if err != nil {
+			return err
+		}
+		discover := a.discover
+		if discover == nil {
+			discover = runner.DiscoverConfig
+		}
+		cfg, err := discover(root)
+		if err != nil {
+			return err
+		}
+		path, err := runner.WriteConfig(root, cfg)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(a.out, "[lbai] Wrote %s\n", path)
+		fmt.Fprintf(a.out, "[lbai] Worker: %s\n", strings.Join(cfg.Worker.Command, " "))
+		checks := cfg.VerificationChecks()
+		if len(checks) == 0 {
+			fmt.Fprintln(a.out, "[lbai] Build: none detected; configure [build] to enforce project verification")
+		} else {
+			for _, check := range checks {
+				fmt.Fprintf(a.out, "[lbai] Check %s: %s\n", check.Name, strings.Join(append([]string{check.Executable}, check.Args...), " "))
+			}
+		}
+		return nil
+	}}
 }
 
 func (a *app) runCommand() *cobra.Command {
@@ -85,12 +118,14 @@ func (a *app) runCommand() *cobra.Command {
 				return err
 			}
 		}
-		verify := runner.CommandVerifier{Root: root, Build: runCfg.Build, Lint: func(ctx context.Context) (string, error) {
+		configuredChecks := runCfg.VerificationChecks()
+		verificationChecks := runner.CommandVerificationChecks(root, configuredChecks, nil)
+		verificationChecks = append(verificationChecks, runner.VerificationCheck{Name: "architecture", Run: func(ctx context.Context) (string, error) {
 			paths, err := changedPaths(ctx, root, plan.Head)
 			if err != nil {
 				return "", err
 			}
-			diagnostics, err := linter.Scan(root, paths, rules)
+			diagnostics, _, err := scanRegressions(ctx, root, plan.Head, paths, rules)
 			if err != nil {
 				return "", err
 			}
@@ -99,7 +134,8 @@ func (a *app) runCommand() *cobra.Command {
 				return text, fmt.Errorf("%d architecture violation(s)", len(diagnostics))
 			}
 			return text, nil
-		}}
+		}})
+		verify := runner.GraphVerifier{Checks: verificationChecks}
 		pipeline := runner.Pipeline{Worker: worker, Reviewer: reviewer, Verifier: verify, Diff: runner.GitDiff{Root: root, Base: plan.Head}, MaxRetries: retries, SkipReview: skipReview, Rollback: func(ctx context.Context) error { _, e := engine.Undo(ctx, false); return e }, Progress: func(step, msg string) { fmt.Fprintf(a.out, "[lbai] [%s] %s\n", step, msg) }}
 		result, err := pipeline.Run(ctx, prompt)
 		if err != nil {
@@ -124,7 +160,7 @@ func (a *app) runCommand() *cobra.Command {
 		if skipReview {
 			reviewSummary = "Skipped"
 		}
-		printSummary(a.out, final, len(rules.Boundaries), reviewSummary)
+		printSummary(a.out, final, len(rules.Boundaries)+len(configuredChecks), reviewSummary)
 		if serve {
 			return a.serve(ctx, root, 3141, true)
 		}
@@ -189,10 +225,10 @@ func (a *app) lintCommand() *cobra.Command {
 			return err
 		}
 		var paths []string
+		base := "HEAD"
 		if path != "" {
 			paths, err = pathsUnder(root, path)
 		} else {
-			base := "HEAD"
 			if state, e := gitengine.LoadState(root); e == nil && state.LastCleanHead != "" {
 				base = state.LastCleanHead
 			}
@@ -201,7 +237,13 @@ func (a *app) lintCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		d, err := linter.Scan(root, paths, cfg)
+		var d []linter.Diagnostic
+		suppressed := 0
+		if path == "" {
+			d, suppressed, err = scanRegressions(cmd.Context(), root, base, paths, cfg)
+		} else {
+			d, err = linter.Scan(root, paths, cfg)
+		}
 		if err != nil {
 			return err
 		}
@@ -209,13 +251,75 @@ func (a *app) lintCommand() *cobra.Command {
 		if len(d) > 0 || strict && hasWarnings(d) {
 			return fmt.Errorf("lint found %d violation(s)", len(d))
 		}
-		fmt.Fprintln(a.out, "[lbai][OK] No architectural violations.")
+		if suppressed > 0 {
+			fmt.Fprintf(a.out, "[lbai][OK] No new architectural violations (%d unchanged baseline violation(s)).\n", suppressed)
+		} else {
+			fmt.Fprintln(a.out, "[lbai][OK] No architectural violations.")
+		}
 		return nil
 	}}
 	c.Flags().StringVarP(&path, "path", "p", "", "file or directory to lint")
 	c.Flags().BoolVar(&strict, "strict", false, "return non-zero for warnings")
 	c.Flags().BoolVar(&fixHint, "fix-hint", false, "show remediation hints")
 	return c
+}
+
+func scanRegressions(ctx context.Context, root, base string, paths []string, cfg linter.Config) ([]linter.Diagnostic, int, error) {
+	current, err := linter.Scan(root, paths, cfg)
+	if err != nil {
+		return nil, 0, err
+	}
+	baselineRoot, err := os.MkdirTemp("", "lbai-lint-baseline-")
+	if err != nil {
+		return nil, 0, fmt.Errorf("create lint baseline: %w", err)
+	}
+	defer os.RemoveAll(baselineRoot)
+	if _, err := gitOutput(ctx, root, "rev-parse", "--verify", base+"^{commit}"); err != nil {
+		return nil, 0, fmt.Errorf("resolve lint baseline %s: %w", base, err)
+	}
+	for _, path := range paths {
+		rel := filepath.ToSlash(filepath.Clean(path))
+		if filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, "../") {
+			return nil, 0, fmt.Errorf("lint baseline path escapes repository: %q", path)
+		}
+		blob, exists, err := gitFile(ctx, root, base, rel)
+		if err != nil {
+			return nil, 0, err
+		}
+		if !exists {
+			continue
+		}
+		target := filepath.Join(baselineRoot, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return nil, 0, fmt.Errorf("create lint baseline directory: %w", err)
+		}
+		if err := os.WriteFile(target, blob, 0o600); err != nil {
+			return nil, 0, fmt.Errorf("write lint baseline %s: %w", rel, err)
+		}
+	}
+	baseline, err := linter.Scan(baselineRoot, paths, cfg)
+	if err != nil {
+		return nil, 0, fmt.Errorf("scan lint baseline: %w", err)
+	}
+	regressions := linter.Regressions(current, baseline)
+	return regressions, len(current) - len(regressions), nil
+}
+
+func gitFile(ctx context.Context, root, revision, path string) ([]byte, bool, error) {
+	object := revision + ":" + path
+	check := exec.CommandContext(ctx, "git", "cat-file", "-e", object)
+	check.Dir = root
+	if err := check.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, false, ctx.Err()
+		}
+		return nil, false, nil
+	}
+	b, err := gitOutput(ctx, root, "show", object)
+	if err != nil {
+		return nil, false, fmt.Errorf("read %s at %s: %w", path, revision, err)
+	}
+	return b, true, nil
 }
 
 func (a *app) logCommand() *cobra.Command {

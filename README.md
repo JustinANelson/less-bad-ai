@@ -14,7 +14,16 @@ Install or copy the same binary as `less-bad-ai` if the long alias is desired.
 
 ## Configure
 
-Copy `.lbai/config.example.toml` to `.lbai/config.toml` and select either a command provider or an OpenAI-compatible endpoint. Commands are executed directly, without a shell.
+Configuration is optional when a supported coding-agent CLI is installed. `lbai`
+auto-detects `codex`, `claude`, or `aider` (in that order), along with common
+Go, Rust, Maven, Gradle, Node, and Python test commands. Detection is read-only;
+run `lbai init` to inspect and persist the detected configuration before the
+first transaction.
+
+An explicit `.lbai/config.toml` always takes precedence. Copy
+`.lbai/config.example.toml` or edit the file produced by `lbai init` to select a
+different command provider or an OpenAI-compatible endpoint. Commands are
+executed directly, without a shell.
 
 ```toml
 [worker]
@@ -26,10 +35,31 @@ model = "qwen3-coder"
 type = "command"
 command = ["claude", "-p", "--permission-mode", "acceptEdits"]
 
-[build]
+[[checks]]
+name = "test"
 executable = "go"
 args = ["test", "./..."]
+
+[[checks]]
+name = "vet"
+executable = "go"
+args = ["vet", "./..."]
 ```
+
+Checks form a dependency graph. Independent checks run concurrently with
+deterministic output; `depends_on` delays a check until its prerequisites pass.
+
+```toml
+[[checks]]
+name = "integration"
+executable = "go"
+args = ["test", "-tags=integration", "./..."]
+depends_on = ["test"]
+```
+
+The earlier `[build]` table remains supported as a single check. Configure
+either `[build]` or `[[checks]]`, not both. The `architecture` check name is
+reserved for LBAI's automatic boundary scan.
 
 Command providers edit the worktree directly. OpenAI-compatible HTTP providers must return one JSON object; free-form or Markdown-wrapped responses are rejected. Writes and deletes are confined to the repository, and `.git` plus LBAI runtime recovery state are protected.
 
@@ -52,11 +82,21 @@ Command providers edit the worktree directly. OpenAI-compatible HTTP providers m
 
 Each `write` operation supplies the complete new file content. Return an empty `operations` array when no edits are needed.
 
-Copy `.lbai/rules.example.toml` to `.lbai/rules.toml` to enforce project boundaries. With no rules file, linting is permissive.
+Copy `.lbai/rules.example.toml` to `.lbai/rules.toml` to customize project
+boundaries. Without a rules file, `lbai` selects a conservative project profile.
+For Go modules, reusable `pkg/` and `internal/` packages may not import the
+module's executable `cmd/` packages.
+
+During `lbai run` and a default `lbai lint`, diagnostics are compared with the
+pre-change Git revision. Existing violations are reported as an unchanged
+baseline and do not block work; newly introduced violations fail verification.
+Use `lbai lint --path <path>` when intentionally auditing all violations in a
+file or directory.
 
 ## Use
 
 ```text
+lbai init
 lbai run "add request validation to the API"
 lbai status
 lbai lint --fix-hint

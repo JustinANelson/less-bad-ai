@@ -269,6 +269,12 @@ func Scan(root string, paths []string, cfg Config) ([]Diagnostic, error) {
 		if strings.HasPrefix(rel, "../") || filepath.IsAbs(rel) {
 			return nil, fmt.Errorf("scan path escapes repository: %q", rel)
 		}
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("stat %s: %w", rel, err)
+		}
 		if isManifest(rel) {
 			d, err := scanManifest(filepath.Join(root, filepath.FromSlash(rel)), rel, cfg)
 			if err != nil {
@@ -306,6 +312,30 @@ func Scan(root string, paths []string, cfg Config) ([]Diagnostic, error) {
 		return diagnostics[i].Rule < diagnostics[j].Rule
 	})
 	return diagnostics, nil
+}
+
+// Regressions returns diagnostics introduced beyond the baseline. Locations
+// and hints are intentionally excluded from identity so reformatting legacy
+// code within the same file does not turn an existing violation into a new one.
+func Regressions(current, baseline []Diagnostic) []Diagnostic {
+	counts := make(map[string]int, len(baseline))
+	for _, diagnostic := range baseline {
+		counts[diagnosticIdentity(diagnostic)]++
+	}
+	regressions := make([]Diagnostic, 0, len(current))
+	for _, diagnostic := range current {
+		identity := diagnosticIdentity(diagnostic)
+		if counts[identity] > 0 {
+			counts[identity]--
+			continue
+		}
+		regressions = append(regressions, diagnostic)
+	}
+	return regressions
+}
+
+func diagnosticIdentity(d Diagnostic) string {
+	return strings.Join([]string{d.Path, d.Rule, d.Violation, d.Offender, d.Severity}, "\x00")
 }
 
 func violates(name string, b Boundary) bool {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 type Config struct {
@@ -45,7 +46,7 @@ func LoadConfig(root string) (Config, error) {
 	path := filepath.Join(root, ".lbai", "rules.toml")
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return DefaultConfig(), nil
+		return DiscoverConfig(root), nil
 	}
 	if err != nil {
 		return Config{}, fmt.Errorf("read rules: %w", err)
@@ -58,6 +59,54 @@ func LoadConfig(root string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// DiscoverConfig selects conservative rules that can be enforced without
+// understanding application-specific layers. Project rules can replace these
+// defaults by defining .lbai/rules.toml.
+func DiscoverConfig(root string) Config {
+	cfg := DefaultConfig()
+	if module := goModulePath(root); module != "" {
+		cfg.Archetype.Name = "automatic-go"
+		for _, path := range []string{"pkg/**", "internal/**"} {
+			cfg.Boundaries = append(cfg.Boundaries, Boundary{
+				Name:             "library-command-direction",
+				PathPattern:      path,
+				ForbiddenImports: []string{`^` + regexp.QuoteMeta(module) + `/cmd(?:/|$)`},
+				Hint:             "Move shared behavior out of cmd; reusable packages must not depend on executable entrypoints.",
+			})
+		}
+		return cfg
+	}
+	for _, marker := range []struct {
+		file string
+		name string
+	}{
+		{file: "package.json", name: "automatic-javascript"},
+		{file: "pom.xml", name: "automatic-jvm"},
+		{file: "build.gradle", name: "automatic-jvm"},
+		{file: "build.gradle.kts", name: "automatic-jvm"},
+	} {
+		if info, err := os.Stat(filepath.Join(root, marker.file)); err == nil && info.Mode().IsRegular() {
+			cfg.Archetype.Name = marker.name
+			return cfg
+		}
+	}
+	return cfg
+}
+
+func goModulePath(root string) string {
+	b, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(strings.SplitN(line, "//", 2)[0])
+		if len(fields) == 2 && fields[0] == "module" {
+			return strings.TrimSpace(fields[1])
+		}
+	}
+	return ""
 }
 
 func (c Config) Validate() error {
