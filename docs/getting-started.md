@@ -14,6 +14,10 @@ questions. It finds Git, detects Codex, Claude, or Aider, detects conventional
 project tests, persists the detected configuration, and creates an initial Git
 baseline when one does not exist.
 
+An empty project may have no checks to detect during setup. In that case,
+`lbai run` discovers checks again after the agent generates the project, so a
+newly created supported manifest is built and tested before the run commits.
+
 If the project already has a Git commit, setup never commits existing work. In
 a clean worktree it commits only the newly detected `.lbai/config.toml`; in a
 dirty worktree it leaves the configuration uncommitted alongside the existing

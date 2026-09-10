@@ -98,6 +98,9 @@ args = ["vet", "./..."]
 
 Checks form a dependency graph. Independent checks run concurrently with
 deterministic output; `depends_on` delays a check until its prerequisites pass.
+When setup starts from an empty project and therefore finds no checks, each run
+discovers them again after the worker writes files. A newly created `go.mod`,
+`package.json`, or other supported manifest is verified in that same transaction.
 
 ```toml
 [[checks]]

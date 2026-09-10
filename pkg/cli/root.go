@@ -209,6 +209,9 @@ func (a *app) runCommand() *cobra.Command {
 		}
 		configuredChecks := runCfg.Checks
 		verificationChecks := runner.CommandVerificationChecks(root, configuredChecks, nil)
+		if len(configuredChecks) == 0 {
+			verificationChecks = append(verificationChecks, runner.AutoVerificationCheck(root, nil))
+		}
 		verificationChecks = append(verificationChecks, runner.VerificationCheck{Name: "architecture", Run: func(ctx context.Context) (string, error) {
 			paths, err := changedPaths(ctx, root, plan.Head)
 			if err != nil {
@@ -249,7 +252,11 @@ func (a *app) runCommand() *cobra.Command {
 		if skipReview {
 			reviewSummary = "Skipped"
 		}
-		printSummary(a.out, final, len(rules.Boundaries)+len(configuredChecks), reviewSummary)
+		summaryChecks := configuredChecks
+		if len(summaryChecks) == 0 {
+			summaryChecks = runner.DiscoverChecks(root)
+		}
+		printSummary(a.out, final, len(rules.Boundaries)+len(summaryChecks), reviewSummary)
 		if serve {
 			return a.serve(ctx, root, 3141, true)
 		}

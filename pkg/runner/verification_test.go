@@ -3,6 +3,10 @@ package runner
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -10,12 +14,17 @@ import (
 )
 
 type recordingProcessRunner struct {
+	mu              sync.Mutex
 	dir, executable string
 	args            []string
+	calls           []string
 }
 
 func (r *recordingProcessRunner) Run(_ context.Context, dir, executable string, args ...string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.dir, r.executable, r.args = dir, executable, append([]string(nil), args...)
+	r.calls = append(r.calls, executable+" "+strings.Join(args, " "))
 	return "check output", nil
 }
 
@@ -105,5 +114,21 @@ func TestCommandVerificationChecksUsesInjectedRunner(t *testing.T) {
 	}
 	if process.dir != "repo" || process.executable != "go" || strings.Join(process.args, " ") != "test ./..." {
 		t.Fatalf("unexpected invocation: %#v", process)
+	}
+}
+
+func TestAutoVerificationCheckDiscoversManifestCreatedAfterConstruction(t *testing.T) {
+	root := t.TempDir()
+	process := &recordingProcessRunner{}
+	check := AutoVerificationCheck(root, process)
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/generated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := check.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(process.calls)
+	if process.dir != root || !reflect.DeepEqual(process.calls, []string{"go test ./...", "go vet ./..."}) {
+		t.Fatalf("unexpected invocations: %#v", process)
 	}
 }

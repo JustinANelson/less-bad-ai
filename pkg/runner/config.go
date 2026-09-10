@@ -62,6 +62,13 @@ func DiscoverConfig(root string) (Config, error) {
 	return discoverConfig(root, exec.LookPath)
 }
 
+// DiscoverChecks re-runs project check discovery against the current
+// worktree. This lets a greenfield agent run introduce a recognizable project
+// manifest and receive build verification in the same transaction.
+func DiscoverChecks(root string) []CheckConfig {
+	return discoverChecks(root, exec.LookPath)
+}
+
 type executableLookup func(string) (string, error)
 
 func discoverConfig(root string, lookPath executableLookup) (Config, error) {

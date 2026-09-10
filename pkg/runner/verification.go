@@ -196,3 +196,16 @@ func CommandVerificationChecks(root string, checks []CheckConfig, processRunner 
 	}
 	return out
 }
+
+// AutoVerificationCheck discovers conventional project checks when it runs,
+// rather than when lbai starts. This allows a greenfield worker to create a
+// project manifest and have its build and tests verified in the same run.
+func AutoVerificationCheck(root string, processRunner ProcessRunner) VerificationCheck {
+	return VerificationCheck{Name: "project-auto", Run: func(ctx context.Context) (string, error) {
+		discovered := DiscoverChecks(root)
+		if len(discovered) == 0 {
+			return "No conventional project build or test command detected.\n", nil
+		}
+		return (GraphVerifier{Checks: CommandVerificationChecks(root, discovered, processRunner)}).Verify(ctx)
+	}}
+}

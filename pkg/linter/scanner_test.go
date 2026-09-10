@@ -3,6 +3,7 @@ package linter
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -148,6 +149,28 @@ const legacy = require('real-require');
 		if imports[i] != want[i] {
 			t.Fatalf("imports = %#v, want %#v", imports, want)
 		}
+	}
+}
+
+func TestJavaScriptImportsAllowApostrophesInJSXText(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "dashboard.jsx")
+	source := `import React from 'react';
+
+export function EmptyState() {
+  return <p>Don't restart a container while it's updating.</p>;
+}
+`
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	imports, err := ExtractImports(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Import{{Name: "react", Line: 1}}
+	if !reflect.DeepEqual(imports, want) {
+		t.Fatalf("imports = %#v, want %#v", imports, want)
 	}
 }
 

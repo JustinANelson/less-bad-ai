@@ -125,6 +125,12 @@ func lexJavaScript(source []byte) ([]jsToken, error) {
 			if !closed {
 				return nil, fmt.Errorf("unterminated block comment at line %d", line)
 			}
+		case source[i] == '\'' && i > 0 && isJSIdentifierPart(source[i-1]):
+			// Apostrophes in JSX text (for example, "don't restart") are not
+			// JavaScript string delimiters. A quote that opens a real string
+			// cannot immediately follow an identifier without an operator.
+			tokens = append(tokens, jsToken{kind: 'p', value: string(source[i]), line: line})
+			i++
 		case source[i] == '\'' || source[i] == '"':
 			quote, startLine := source[i], line
 			i++
