@@ -1,0 +1,12 @@
+# Copy to .lbai/config.toml. Commands execute directly without a shell.
+[worker]
+type = "command"
+command = ["claude", "-p", "--permission-mode", "acceptEdits"]
+
+[reviewer]
+type = "command"
+command = ["claude", "-p", "--permission-mode", "acceptEdits"]
+
+[build]
+executable = "go"
+args = ["test", "./..."]

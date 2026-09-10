@@ -1,0 +1,10 @@
+# Local less-bad-ai recovery state. Durable traces remain versioned.
+.lbai/state.json
+.lbai/snapshots/
+.lbai/config.local.toml
+
+# Build output
+/lbai
+/lbai.exe
+/less-bad-ai
+/less-bad-ai.exe

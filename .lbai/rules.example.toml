@@ -1,0 +1,16 @@
+[archetype]
+name = "layered-go"
+version = "1"
+allowed_extensions = [".go", ".java", ".kt", ".kts", ".js", ".jsx", ".ts", ".tsx"]
+
+[[boundaries]]
+name = "UI Layer"
+path_pattern = "src/ui/**"
+forbidden_imports = ["^database/sql$", "^net/http$", "^com\\.mongodb\\."]
+allowed_imports = ["^example\\.com/project/(components|services)(/.*)?$"]
+hint = "Route persistence and network access through the service layer."
+
+[[forbidden_dependencies]]
+name = "left-pad"
+pattern = "(?m)(^|[\"[:space:]])left-pad([\"[:space:]]|$)"
+hint = "Use the standard library or an existing project utility."

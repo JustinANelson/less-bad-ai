@@ -1,0 +1,273 @@
+package gitengine
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+type Commander interface {
+	Run(ctx context.Context, dir, name string, args ...string) ([]byte, error)
+}
+
+type ExecCommander struct{}
+
+func (ExecCommander) Run(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return out, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return out, nil
+}
+
+type Engine struct {
+	Dir   string
+	Git   Commander
+	Now   func() time.Time
+	NewID func() string
+}
+
+type BeginOptions struct {
+	Prompt string
+	DryRun bool
+}
+
+type Plan struct {
+	Root        string
+	Head        string
+	SnapshotRef string
+	Dirty       bool
+	State       State
+}
+
+func New(dir string) *Engine {
+	return &Engine{Dir: dir, Git: ExecCommander{}, Now: time.Now, NewID: randomID}
+}
+
+func randomID() string {
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
+func (e *Engine) Root(ctx context.Context) (string, error) {
+	out, err := e.git(ctx, e.Dir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", fmt.Errorf("current directory is not a Git repository: %w", err)
+	}
+	root, err := filepath.Abs(strings.TrimSpace(string(out)))
+	if err != nil {
+		return "", fmt.Errorf("resolve repository root: %w", err)
+	}
+	return filepath.Clean(root), nil
+}
+
+func (e *Engine) Begin(ctx context.Context, opts BeginOptions) (Plan, error) {
+	root, err := e.Root(ctx)
+	if err != nil {
+		return Plan{}, err
+	}
+	if previous, err := LoadState(root); err == nil && previous.Status == StatusInProgress {
+		return Plan{}, fmt.Errorf("transaction %s is already in progress", previous.TransactionID)
+	}
+	headOut, err := e.git(ctx, root, "rev-parse", "HEAD")
+	if err != nil {
+		return Plan{}, fmt.Errorf("repository must have an initial commit: %w", err)
+	}
+	head := strings.TrimSpace(string(headOut))
+	statusOut, err := e.git(ctx, root, "status", "--porcelain=v1", "--untracked-files=all")
+	if err != nil {
+		return Plan{}, err
+	}
+	dirty := len(bytes.TrimSpace(statusOut)) > 0
+	now := e.now().UTC()
+	id := e.newID()
+	snapshot := fmt.Sprintf("refs/lbai/snapshots/%d-%s", now.Unix(), id)
+	state := State{
+		Version: stateVersion, TransactionID: id, Repository: root,
+		LastCleanHead: head, SnapshotRef: snapshot, Timestamp: now,
+		Status: StatusInProgress, Prompt: opts.Prompt,
+	}
+	plan := Plan{Root: root, Head: head, SnapshotRef: snapshot, Dirty: dirty, State: state}
+	if opts.DryRun {
+		return plan, nil
+	}
+	if _, err := e.git(ctx, root, "update-ref", snapshot, head, ""); err != nil {
+		return Plan{}, fmt.Errorf("create snapshot ref: %w", err)
+	}
+	if dirty {
+		stashRef := fmt.Sprintf("refs/lbai/stash/%s", id)
+		if _, err := e.git(ctx, root, "stash", "push", "--include-untracked", "--message", "lbai "+id); err != nil {
+			e.deleteRef(ctx, root, snapshot)
+			return Plan{}, fmt.Errorf("stash existing changes: %w", err)
+		}
+		stashSHA, err := e.git(ctx, root, "rev-parse", "refs/stash")
+		if err != nil {
+			e.deleteRef(ctx, root, snapshot)
+			return Plan{}, fmt.Errorf("resolve saved changes: %w", err)
+		}
+		if _, err := e.git(ctx, root, "update-ref", stashRef, strings.TrimSpace(string(stashSHA)), ""); err != nil {
+			e.deleteRef(ctx, root, snapshot)
+			return Plan{}, fmt.Errorf("retain saved changes: %w", err)
+		}
+		if _, err := e.git(ctx, root, "stash", "drop", "stash@{0}"); err != nil {
+			return Plan{}, fmt.Errorf("detach saved changes from stash stack: %w", err)
+		}
+		state.StashRef = stashRef
+		plan.State = state
+	}
+	if err := saveState(root, state); err != nil {
+		return Plan{}, err
+	}
+	return plan, nil
+}
+
+func (e *Engine) CaptureCreatedFiles(ctx context.Context) error {
+	root, err := e.Root(ctx)
+	if err != nil {
+		return err
+	}
+	state, err := LoadState(root)
+	if err != nil {
+		return err
+	}
+	out, err := e.git(ctx, root, "ls-files", "--others", "--exclude-standard")
+	if err != nil {
+		return err
+	}
+	state.CreatedFiles = nonemptyLines(out)
+	return saveState(root, state)
+}
+
+func (e *Engine) Complete(ctx context.Context) error {
+	root, err := e.Root(ctx)
+	if err != nil {
+		return err
+	}
+	state, err := LoadState(root)
+	if err != nil {
+		return err
+	}
+	if err := e.restoreStash(ctx, root, &state); err != nil {
+		state.Status, state.Error = StatusRecoveryRequired, err.Error()
+		_ = saveState(root, state)
+		return err
+	}
+	state.Status = StatusComplete
+	return saveState(root, state)
+}
+
+func (e *Engine) Undo(ctx context.Context, hard bool) (State, error) {
+	root, err := e.Root(ctx)
+	if err != nil {
+		return State{}, err
+	}
+	state, err := LoadState(root)
+	if err != nil {
+		return State{}, err
+	}
+	if filepath.Clean(state.Repository) != root {
+		return State{}, fmt.Errorf("state belongs to repository %s, not %s", state.Repository, root)
+	}
+	if _, err := e.git(ctx, root, "cat-file", "-e", state.LastCleanHead+"^{commit}"); err != nil {
+		return State{}, fmt.Errorf("pre-run commit is unavailable: %w", err)
+	}
+	if _, err := e.git(ctx, root, "reset", "--hard", state.LastCleanHead); err != nil {
+		return State{}, fmt.Errorf("reset to pre-run commit: %w", err)
+	}
+	if hard {
+		if _, err := e.git(ctx, root, "clean", "-fd"); err != nil {
+			return State{}, err
+		}
+	} else if err := removeCreated(root, state.CreatedFiles); err != nil {
+		return State{}, err
+	}
+	if err := e.restoreStash(ctx, root, &state); err != nil {
+		state.Status, state.Error = StatusRecoveryRequired, err.Error()
+		_ = saveState(root, state)
+		return state, err
+	}
+	state.Status, state.Error = StatusRolledBack, ""
+	if err := saveState(root, state); err != nil {
+		return State{}, err
+	}
+	return state, nil
+}
+
+func (e *Engine) restoreStash(ctx context.Context, root string, state *State) error {
+	if state.StashRef == "" {
+		return nil
+	}
+	if _, err := e.git(ctx, root, "stash", "apply", "--index", state.StashRef); err != nil {
+		return fmt.Errorf("restore pre-run changes from %s: %w", state.StashRef, err)
+	}
+	if err := e.deleteRef(ctx, root, state.StashRef); err != nil {
+		return err
+	}
+	state.StashRef = ""
+	return nil
+}
+
+func removeCreated(root string, paths []string) error {
+	sort.Sort(sort.Reverse(sort.StringSlice(paths)))
+	for _, rel := range paths {
+		clean := filepath.Clean(filepath.FromSlash(rel))
+		if clean == "." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
+			return fmt.Errorf("unsafe transaction-created path %q", rel)
+		}
+		path := filepath.Join(root, clean)
+		within, err := filepath.Rel(root, path)
+		if err != nil || strings.HasPrefix(within, "..") {
+			return fmt.Errorf("path escapes repository: %q", rel)
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove %s: %w", rel, err)
+		}
+	}
+	return nil
+}
+
+func (e *Engine) git(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	if e.Git == nil {
+		e.Git = ExecCommander{}
+	}
+	return e.Git.Run(ctx, dir, "git", args...)
+}
+func (e *Engine) now() time.Time {
+	if e.Now != nil {
+		return e.Now()
+	}
+	return time.Now()
+}
+func (e *Engine) newID() string {
+	if e.NewID != nil {
+		return e.NewID()
+	}
+	return randomID()
+}
+func (e *Engine) deleteRef(ctx context.Context, root, ref string) error {
+	_, err := e.git(ctx, root, "update-ref", "-d", ref)
+	return err
+}
+func nonemptyLines(b []byte) []string {
+	var out []string
+	for _, s := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
