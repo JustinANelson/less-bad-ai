@@ -128,20 +128,26 @@ func (e *Engine) Begin(ctx context.Context, opts BeginOptions) (Plan, error) {
 		}
 		stashSHA, err := e.git(ctx, root, "rev-parse", "refs/stash")
 		if err != nil {
-			e.deleteRef(ctx, root, snapshot)
-			return Plan{}, fmt.Errorf("resolve saved changes: %w", err)
+			cleanupErr := e.abortBegin(ctx, root, snapshot, "stash@{0}", true, "")
+			return Plan{}, joinOperationError("resolve saved changes", err, cleanupErr)
 		}
 		if _, err := e.git(ctx, root, "update-ref", state.StashRef, strings.TrimSpace(string(stashSHA)), ""); err != nil {
-			e.deleteRef(ctx, root, snapshot)
-			return Plan{}, fmt.Errorf("retain saved changes: %w", err)
+			cleanupErr := e.abortBegin(ctx, root, snapshot, "stash@{0}", true, "")
+			return Plan{}, joinOperationError("retain saved changes", err, cleanupErr)
 		}
 		if _, err := e.git(ctx, root, "stash", "drop", "stash@{0}"); err != nil {
-			return Plan{}, fmt.Errorf("detach saved changes from stash stack: %w", err)
+			cleanupErr := e.abortBegin(ctx, root, snapshot, state.StashRef, true, state.StashRef)
+			return Plan{}, joinOperationError("detach saved changes from stash stack", err, cleanupErr)
 		}
 		plan.State = state
 	}
 	if err := saveState(root, state); err != nil {
-		return Plan{}, err
+		changesRef := ""
+		if dirty {
+			changesRef = state.StashRef
+		}
+		cleanupErr := e.abortBegin(ctx, root, snapshot, changesRef, false, state.StashRef)
+		return Plan{}, joinOperationError("save transaction state", err, cleanupErr)
 	}
 	return plan, nil
 }
@@ -289,6 +295,39 @@ func (e *Engine) deleteRef(ctx context.Context, root, ref string) error {
 	_, err := e.git(ctx, root, "update-ref", "-d", ref)
 	return err
 }
+
+// abortBegin restores user changes after a partially completed Begin. Refs are
+// retained when restoration fails so manual recovery remains possible.
+func (e *Engine) abortBegin(ctx context.Context, root, snapshot, changesRef string, dropTopStash bool, ownedStashRef string) error {
+	if changesRef != "" {
+		if _, err := e.git(ctx, root, "stash", "apply", "--index", changesRef); err != nil {
+			return fmt.Errorf("restore saved changes from %s: %w", changesRef, err)
+		}
+	}
+	var cleanupErrs []error
+	if dropTopStash {
+		if _, err := e.git(ctx, root, "stash", "drop", "stash@{0}"); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("drop temporary stash: %w", err))
+		}
+	}
+	if ownedStashRef != "" {
+		if err := e.deleteRef(ctx, root, ownedStashRef); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("delete temporary stash ref: %w", err))
+		}
+	}
+	if err := e.deleteRef(ctx, root, snapshot); err != nil {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("delete snapshot ref: %w", err))
+	}
+	return errors.Join(cleanupErrs...)
+}
+
+func joinOperationError(operation string, operationErr, cleanupErr error) error {
+	if cleanupErr == nil {
+		return fmt.Errorf("%s: %w", operation, operationErr)
+	}
+	return fmt.Errorf("%s: %w", operation, errors.Join(operationErr, fmt.Errorf("restore worktree after failed begin: %w", cleanupErr)))
+}
+
 func nulSeparatedPaths(b []byte) []string {
 	parts := bytes.Split(b, []byte{0})
 	out := make([]string, 0, len(parts))

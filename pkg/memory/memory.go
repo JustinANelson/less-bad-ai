@@ -58,6 +58,9 @@ func (f Finalizer) Finalize(ctx context.Context, o FinalizeOptions) (FinalizeRes
 	message := o.Message
 	if message == "" {
 		message = synthesizeMessage(files, o.Prompt)
+		if err := validateGeneratedSubject(message); err != nil {
+			return result, err
+		}
 	}
 	traceID := fmt.Sprintf("lbai-%d", f.now().UTC().UnixNano())
 	message += "\n\nWhy: Generated and verified through the less-bad-ai transaction pipeline.\nLBAI-Trace-ID: " + traceID
@@ -97,6 +100,9 @@ func (f Finalizer) now() time.Time {
 }
 
 func writeTrace(root string, t Trace) error {
+	if err := validateTrace(t); err != nil {
+		return err
+	}
 	path := filepath.Join(root, filepath.FromSlash(t.TracePath))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -108,24 +114,101 @@ func writeTrace(root string, t Trace) error {
 	return os.WriteFile(path, append(b, '\n'), 0o644)
 }
 func updateDocs(root string, t Trace) error {
-	arch := fmt.Sprintf("# Architecture\n\n## Topology\n\nThe repository topology is derived from source imports by `lbai ui`.\n\n## Recent Decisions\n\n- %s: %s (`%s`)\n", t.Timestamp.Format(time.RFC3339), t.ADRDecision, short(t.CommitSHA))
-	if err := os.WriteFile(filepath.Join(root, "ARCHITECTURE.md"), []byte(arch), 0o644); err != nil {
+	archPath := filepath.Join(root, "ARCHITECTURE.md")
+	archBytes, err := os.ReadFile(archPath)
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	context := fmt.Sprintf("# AI Context\n\nLast verified change: %s\n\n%s\n", t.Timestamp.Format(time.RFC3339), fallback(t.WorkerSummary, "No worker summary was provided."))
-	if err := os.WriteFile(filepath.Join(root, "AI_CONTEXT.md"), []byte(context), 0o644); err != nil {
+	arch := string(archBytes)
+	if strings.TrimSpace(arch) == "" {
+		arch = "# Architecture\n"
+	}
+	arch = replaceMarkdownSection(arch, "Topology", "The repository topology is derived from source imports by `lbai ui`.")
+	decision := fmt.Sprintf("- %s: %s (`%s`)", t.Timestamp.Format(time.RFC3339), t.ADRDecision, short(t.CommitSHA))
+	if existing := markdownSectionBody(arch, "Recent Decisions"); existing != "" {
+		decision += "\n" + existing
+	}
+	arch = replaceMarkdownSection(arch, "Recent Decisions", decision)
+	if err := os.WriteFile(archPath, []byte(arch), 0o644); err != nil {
+		return err
+	}
+	contextPath := filepath.Join(root, "AI_CONTEXT.md")
+	contextBytes, err := os.ReadFile(contextPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	contextDoc := string(contextBytes)
+	if strings.TrimSpace(contextDoc) == "" {
+		contextDoc = "# AI Context\n"
+	}
+	latest := fmt.Sprintf("Last verified change: %s\n\n%s", t.Timestamp.Format(time.RFC3339), fallback(t.WorkerSummary, "No worker summary was provided."))
+	contextDoc = replaceMarkdownSection(contextDoc, "Latest Verified Change", latest)
+	if err := os.WriteFile(contextPath, []byte(contextDoc), 0o644); err != nil {
 		return err
 	}
 	logPath := filepath.Join(root, "docs", "decisions", "LOG.md")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return err
 	}
-	existing, _ := os.ReadFile(logPath)
-	if len(existing) == 0 {
-		existing = []byte("# Decision Log\n\n")
+	traces, err := List(root, 0)
+	if err != nil {
+		return err
 	}
-	entry := fmt.Sprintf("## %s — %s\n\n- Trace: `%s`\n- Files: %s\n- Decision: %s\n\n", t.Timestamp.Format(time.RFC3339), short(t.CommitSHA), t.TracePath, strings.Join(t.TouchedFiles, ", "), t.ADRDecision)
-	return os.WriteFile(logPath, append(existing, entry...), 0o644)
+	sort.Slice(traces, func(i, j int) bool {
+		if traces[i].Timestamp.Equal(traces[j].Timestamp) {
+			return traces[i].TraceID < traces[j].TraceID
+		}
+		return traces[i].Timestamp.Before(traces[j].Timestamp)
+	})
+	var log strings.Builder
+	log.WriteString("# Decision Log\n\n")
+	for _, trace := range traces {
+		fmt.Fprintf(&log, "## %s — %s\n\n- Trace: `%s`\n- Files: %s\n- Decision: %s\n\n", trace.Timestamp.Format(time.RFC3339), short(trace.CommitSHA), trace.TracePath, strings.Join(trace.TouchedFiles, ", "), trace.ADRDecision)
+	}
+	return os.WriteFile(logPath, []byte(log.String()), 0o644)
+}
+
+func markdownSectionBody(document, title string) string {
+	heading := "## " + title
+	lines := strings.Split(strings.ReplaceAll(document, "\r\n", "\n"), "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == heading {
+			start = i + 1
+			continue
+		}
+		if start >= 0 && strings.HasPrefix(line, "## ") {
+			return strings.TrimSpace(strings.Join(lines[start:i], "\n"))
+		}
+	}
+	if start >= 0 {
+		return strings.TrimSpace(strings.Join(lines[start:], "\n"))
+	}
+	return ""
+}
+
+func replaceMarkdownSection(document, title, body string) string {
+	heading := "## " + title
+	lines := strings.Split(strings.TrimRight(strings.ReplaceAll(document, "\r\n", "\n"), "\n"), "\n")
+	start, end := -1, len(lines)
+	for i, line := range lines {
+		if strings.TrimSpace(line) == heading {
+			start = i
+			continue
+		}
+		if start >= 0 && strings.HasPrefix(line, "## ") {
+			end = i
+			break
+		}
+	}
+	replacement := []string{heading, "", strings.TrimSpace(body), ""}
+	if start < 0 {
+		return strings.Join(append(append(lines, ""), replacement...), "\n") + "\n"
+	}
+	updated := append([]string{}, lines[:start]...)
+	updated = append(updated, replacement...)
+	updated = append(updated, lines[end:]...)
+	return strings.Join(updated, "\n") + "\n"
 }
 func List(root string, limit int) ([]Trace, error) {
 	entries, err := filepath.Glob(filepath.Join(root, ".lbai", "traces", "*.json"))
@@ -142,10 +225,22 @@ func List(root string, limit int) ([]Trace, error) {
 		if err := json.Unmarshal(b, &t); err != nil {
 			return nil, fmt.Errorf("decode %s: %w", path, err)
 		}
-		t.TracePath = filepath.ToSlash(path)
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve trace path %s: %w", path, err)
+		}
+		t.TracePath = filepath.ToSlash(rel)
+		if err := validateTrace(t); err != nil {
+			return nil, fmt.Errorf("validate %s: %w", path, err)
+		}
 		traces = append(traces, t)
 	}
-	sort.Slice(traces, func(i, j int) bool { return traces[i].Timestamp.After(traces[j].Timestamp) })
+	sort.Slice(traces, func(i, j int) bool {
+		if traces[i].Timestamp.Equal(traces[j].Timestamp) {
+			return traces[i].TraceID < traces[j].TraceID
+		}
+		return traces[i].Timestamp.After(traces[j].Timestamp)
+	})
 	if limit > 0 && len(traces) > limit {
 		traces = traces[:limit]
 	}
@@ -164,10 +259,34 @@ func synthesizeMessage(files []string, prompt string) string {
 		summary = "apply verified agent changes"
 	}
 	summary = strings.ToLower(strings.TrimSuffix(summary, "."))
-	if len(summary) > 60 {
-		summary = summary[:60]
+	prefix := fmt.Sprintf("feat(%s): ", sanitize(scope))
+	available := 72 - len([]rune(prefix))
+	runes := []rune(summary)
+	if len(runes) > available {
+		summary = strings.TrimSpace(string(runes[:available]))
 	}
-	return fmt.Sprintf("feat(%s): %s", sanitize(scope), summary)
+	return prefix + summary
+}
+
+func validateGeneratedSubject(subject string) error {
+	if len([]rune(subject)) > 72 {
+		return fmt.Errorf("generated commit subject exceeds 72 characters")
+	}
+	if !strings.HasPrefix(subject, "feat(") || !strings.Contains(subject, "): ") {
+		return fmt.Errorf("generated commit subject is not conventional: %q", subject)
+	}
+	return nil
+}
+
+func validateTrace(t Trace) error {
+	if t.Version != TraceVersion || t.TraceID == "" || t.CommitSHA == "" || t.Timestamp.IsZero() {
+		return fmt.Errorf("invalid trace: version, trace_id, commit_sha, and timestamp are required")
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(t.TracePath)))
+	if !strings.HasPrefix(clean, ".lbai/traces/") || strings.HasPrefix(clean, "../") || filepath.IsAbs(t.TracePath) {
+		return fmt.Errorf("invalid trace path %q", t.TracePath)
+	}
+	return nil
 }
 func sanitize(s string) string {
 	var b strings.Builder

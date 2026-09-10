@@ -3,9 +3,11 @@ package linter
 import (
 	"bufio"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -31,7 +33,6 @@ type Diagnostic struct {
 
 var (
 	javaImport = regexp.MustCompile(`^\s*import\s+(?:static\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$*][\w$*]*)*)\s*;?`)
-	esImport   = regexp.MustCompile(`(?:^|\s)import\s+(?:[^'";]+?\s+from\s+)?["']([^"']+)["']|require\s*\(\s*["']([^"']+)["']\s*\)|import\s*\(\s*["']([^"']+)["']\s*\)`)
 )
 
 func ExtractImports(path string) ([]Import, error) {
@@ -42,10 +43,155 @@ func ExtractImports(path string) ([]Import, error) {
 	case ".java", ".kt", ".kts":
 		return lineImports(path, javaImport)
 	case ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs":
-		return lineImports(path, esImport)
+		return javascriptImports(path)
 	default:
 		return nil, nil
 	}
+}
+
+type jsToken struct {
+	kind  byte
+	value string
+	line  int
+}
+
+func javascriptImports(path string) ([]Import, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	tokens, err := lexJavaScript(b)
+	if err != nil {
+		return nil, err
+	}
+	var imports []Import
+	for i, token := range tokens {
+		if token.kind != 'i' {
+			continue
+		}
+		switch token.value {
+		case "require":
+			if i+2 < len(tokens) && tokens[i+1].value == "(" && tokens[i+2].kind == 's' {
+				imports = append(imports, Import{Name: tokens[i+2].value, Line: token.line})
+			}
+		case "import":
+			if i+2 < len(tokens) && tokens[i+1].value == "(" && tokens[i+2].kind == 's' {
+				imports = append(imports, Import{Name: tokens[i+2].value, Line: token.line})
+				continue
+			}
+			for j := i + 1; j < len(tokens) && j <= i+20; j++ {
+				if tokens[j].value == ";" || tokens[j].value == "=" {
+					break
+				}
+				if tokens[j].kind == 's' {
+					imports = append(imports, Import{Name: tokens[j].value, Line: token.line})
+					break
+				}
+			}
+		}
+	}
+	return imports, nil
+}
+
+func lexJavaScript(source []byte) ([]jsToken, error) {
+	var tokens []jsToken
+	line := 1
+	for i := 0; i < len(source); {
+		switch {
+		case source[i] == '\n':
+			line++
+			i++
+		case source[i] == ' ' || source[i] == '\t' || source[i] == '\r':
+			i++
+		case i+1 < len(source) && source[i] == '/' && source[i+1] == '/':
+			i += 2
+			for i < len(source) && source[i] != '\n' {
+				i++
+			}
+		case i+1 < len(source) && source[i] == '/' && source[i+1] == '*':
+			i += 2
+			closed := false
+			for i < len(source) {
+				if source[i] == '\n' {
+					line++
+				}
+				if i+1 < len(source) && source[i] == '*' && source[i+1] == '/' {
+					i += 2
+					closed = true
+					break
+				}
+				i++
+			}
+			if !closed {
+				return nil, fmt.Errorf("unterminated block comment at line %d", line)
+			}
+		case source[i] == '\'' || source[i] == '"':
+			quote, startLine := source[i], line
+			i++
+			var value strings.Builder
+			closed := false
+			for i < len(source) {
+				if source[i] == '\\' && i+1 < len(source) {
+					value.WriteByte(source[i+1])
+					i += 2
+					continue
+				}
+				if source[i] == quote {
+					i++
+					closed = true
+					break
+				}
+				if source[i] == '\n' {
+					line++
+				}
+				value.WriteByte(source[i])
+				i++
+			}
+			if !closed {
+				return nil, fmt.Errorf("unterminated string at line %d", startLine)
+			}
+			tokens = append(tokens, jsToken{kind: 's', value: value.String(), line: startLine})
+		case source[i] == '`':
+			startLine := line
+			i++
+			closed := false
+			for i < len(source) {
+				if source[i] == '\\' && i+1 < len(source) {
+					i += 2
+					continue
+				}
+				if source[i] == '`' {
+					i++
+					closed = true
+					break
+				}
+				if source[i] == '\n' {
+					line++
+				}
+				i++
+			}
+			if !closed {
+				return nil, fmt.Errorf("unterminated template string at line %d", startLine)
+			}
+		case isJSIdentifierStart(source[i]):
+			start := i
+			for i++; i < len(source) && isJSIdentifierPart(source[i]); i++ {
+			}
+			tokens = append(tokens, jsToken{kind: 'i', value: string(source[start:i]), line: line})
+		default:
+			tokens = append(tokens, jsToken{kind: 'p', value: string(source[i]), line: line})
+			i++
+		}
+	}
+	return tokens, nil
+}
+
+func isJSIdentifierStart(b byte) bool {
+	return b == '_' || b == '$' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z'
+}
+
+func isJSIdentifierPart(b byte) bool {
+	return isJSIdentifierStart(b) || b >= '0' && b <= '9'
 }
 
 func goImports(path string) ([]Import, error) {
@@ -201,24 +347,11 @@ func scanManifest(path, rel string, cfg Config) ([]Diagnostic, error) {
 	if err != nil {
 		return nil, err
 	}
-	values := string(b)
-	if filepath.Base(path) == "package.json" {
-		var doc struct {
-			Dependencies    map[string]string `json:"dependencies"`
-			DevDependencies map[string]string `json:"devDependencies"`
-		}
-		if err := json.Unmarshal(b, &doc); err != nil {
-			return nil, err
-		}
-		var names []string
-		for k := range doc.Dependencies {
-			names = append(names, k)
-		}
-		for k := range doc.DevDependencies {
-			names = append(names, k)
-		}
-		values = strings.Join(names, "\n")
+	dependencies, err := manifestDependencies(filepath.Base(path), b)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", rel, err)
 	}
+	values := strings.Join(dependencies, "\n")
 	var out []Diagnostic
 	for _, d := range cfg.ForbiddenDependencies {
 		pattern := d.Pattern
@@ -234,6 +367,110 @@ func scanManifest(path, rel string, cfg Config) ([]Diagnostic, error) {
 		}
 	}
 	return out, nil
+}
+
+func manifestDependencies(name string, b []byte) ([]string, error) {
+	switch name {
+	case "package.json":
+		var doc struct {
+			Dependencies         map[string]string `json:"dependencies"`
+			DevDependencies      map[string]string `json:"devDependencies"`
+			PeerDependencies     map[string]string `json:"peerDependencies"`
+			OptionalDependencies map[string]string `json:"optionalDependencies"`
+		}
+		if err := json.Unmarshal(b, &doc); err != nil {
+			return nil, err
+		}
+		set := make(map[string]struct{})
+		for _, group := range []map[string]string{doc.Dependencies, doc.DevDependencies, doc.PeerDependencies, doc.OptionalDependencies} {
+			for dependency := range group {
+				set[dependency] = struct{}{}
+			}
+		}
+		return sortedKeys(set), nil
+	case "go.mod":
+		return goModDependencies(b), nil
+	case "pom.xml":
+		return pomDependencies(b)
+	default:
+		return nil, nil
+	}
+}
+
+func goModDependencies(b []byte) []string {
+	var dependencies []string
+	inRequireBlock := false
+	scanner := bufio.NewScanner(strings.NewReader(string(b)))
+	for scanner.Scan() {
+		line := strings.TrimSpace(strings.SplitN(scanner.Text(), "//", 2)[0])
+		if line == "" {
+			continue
+		}
+		if inRequireBlock {
+			if line == ")" {
+				inRequireBlock = false
+				continue
+			}
+			if fields := strings.Fields(line); len(fields) >= 2 {
+				dependencies = append(dependencies, fields[0])
+			}
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "require" {
+			if fields[1] == "(" {
+				inRequireBlock = true
+			} else {
+				dependencies = append(dependencies, fields[1])
+			}
+		}
+	}
+	sort.Strings(dependencies)
+	return dependencies
+}
+
+func pomDependencies(b []byte) ([]string, error) {
+	decoder := xml.NewDecoder(strings.NewReader(string(b)))
+	var dependencies []string
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "dependency" {
+			continue
+		}
+		var dependency struct {
+			GroupID    string `xml:"groupId"`
+			ArtifactID string `xml:"artifactId"`
+		}
+		if err := decoder.DecodeElement(&dependency, &start); err != nil {
+			return nil, err
+		}
+		group := strings.TrimSpace(dependency.GroupID)
+		artifact := strings.TrimSpace(dependency.ArtifactID)
+		if artifact != "" {
+			dependencies = append(dependencies, artifact)
+			if group != "" {
+				dependencies = append(dependencies, group+":"+artifact)
+			}
+		}
+	}
+	sort.Strings(dependencies)
+	return dependencies, nil
+}
+
+func sortedKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func globRegexp(pattern string) (*regexp.Regexp, error) {

@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -21,6 +23,7 @@ type Server struct {
 	Root, Token string
 	Undo        func() error
 	mu          sync.Mutex
+	transaction sync.Mutex
 	clients     map[chan string]struct{}
 }
 
@@ -74,6 +77,8 @@ func (s *Server) revert(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "undo unavailable", 503)
 		return
 	}
+	s.transaction.Lock()
+	defer s.transaction.Unlock()
 	if err := s.Undo(); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -117,7 +122,19 @@ func (s *Server) Broadcast(msg string) {
 	}
 }
 func sameOrigin(origin, host string) bool {
-	return strings.EqualFold(strings.TrimPrefix(strings.TrimPrefix(origin, "http://"), "https://"), host)
+	u, err := url.Parse(origin)
+	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
+		return false
+	}
+	if !strings.EqualFold(u.Host, host) {
+		return false
+	}
+	hostname := u.Hostname()
+	if strings.EqualFold(hostname, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(hostname)
+	return ip != nil && ip.IsLoopback()
 }
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

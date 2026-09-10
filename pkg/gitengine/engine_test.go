@@ -263,6 +263,51 @@ func TestBeginDoesNotOverwriteExistingSnapshotRef(t *testing.T) {
 	}
 }
 
+func TestBeginStashRefCollisionRestoresDirtyWorktree(t *testing.T) {
+	root := gitFixture(t)
+	head := runGit(t, root, "rev-parse", "HEAD")
+	runGit(t, root, "update-ref", "refs/lbai/stash/collision", head, "")
+	tracked := filepath.Join(root, "tracked.txt")
+	if err := os.WriteFile(tracked, []byte("user change"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	userFile := filepath.Join(root, "user file.txt")
+	if err := os.WriteFile(userFile, []byte("user data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := New(root)
+	e.Now = func() time.Time { return time.Unix(1700000001, 0) }
+	e.NewID = func() string { return "collision" }
+
+	if _, err := e.Begin(context.Background(), BeginOptions{Prompt: "agent"}); err == nil || !strings.Contains(err.Error(), "retain saved changes") {
+		t.Fatalf("Begin error = %v", err)
+	}
+	assertFileContent(t, tracked, "user change")
+	assertFileContent(t, userFile, "user data")
+	if got := runGit(t, root, "rev-parse", "refs/lbai/stash/collision"); got != head {
+		t.Fatalf("existing stash ref moved from %s to %s", head, got)
+	}
+	assertMissingRef(t, root, "refs/lbai/snapshots/1700000001-collision")
+	assertMissingRef(t, root, "refs/stash")
+}
+
+func TestBeginStateWriteFailureRemovesSnapshotRef(t *testing.T) {
+	root := gitFixture(t)
+	if err := os.WriteFile(filepath.Join(root, ".lbai"), []byte("blocks state directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "add", ".lbai")
+	runGit(t, root, "commit", "-m", "block state directory")
+	e := New(root)
+	e.Now = func() time.Time { return time.Unix(1700000002, 0) }
+	e.NewID = func() string { return "state-failure" }
+
+	if _, err := e.Begin(context.Background(), BeginOptions{Prompt: "agent"}); err == nil || !strings.Contains(err.Error(), "save transaction state") {
+		t.Fatalf("Begin error = %v", err)
+	}
+	assertMissingRef(t, root, "refs/lbai/snapshots/1700000002-state-failure")
+}
+
 func TestBeginRequiresInitialCommit(t *testing.T) {
 	root := t.TempDir()
 	runGit(t, root, "init")
@@ -335,5 +380,14 @@ func assertFileContent(t *testing.T, path, want string) {
 	}
 	if string(b) != want {
 		t.Fatalf("%s content = %q, want %q", path, b, want)
+	}
+}
+
+func assertMissingRef(t *testing.T, root, ref string) {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref)
+	cmd.Dir = root
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("Git ref still exists: %s", ref)
 	}
 }

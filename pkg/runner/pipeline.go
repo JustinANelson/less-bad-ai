@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 const TechLeadPrompt = `You are the Automated Tech Lead. Inspect this diff. Enforce existing code idioms, eliminate temporary logs/debug statements, extract inline logic into shared utilities if duplicate patterns exist, and preserve all architectural boundaries.`
@@ -41,7 +42,7 @@ func (p *Pipeline) Run(ctx context.Context, prompt string) (Result, error) {
 	}
 	p.progress("1/4", "Worker generating code...")
 	summary, err := p.Worker.Run(ctx, prompt)
-	result.WorkerSummary = summary
+	result.WorkerSummary = truncate(summary, 8192)
 	if err != nil {
 		return result, p.fail(ctx, fmt.Errorf("worker failed: %w", err))
 	}
@@ -59,18 +60,29 @@ func (p *Pipeline) Run(ctx context.Context, prompt string) (Result, error) {
 			return result, p.fail(ctx, fmt.Errorf("verification failed after %d corrections: %w\n%s", attempt, verifyErr, diagnostics))
 		}
 		result.Retries++
-		correction := fmt.Sprintf("Original objective:\n%s\n\nAttempt %d verification failed. Correct the worktree using these exact diagnostics:\n%s\n%v", prompt, attempt+1, diagnostics, verifyErr)
+		diff := ""
+		if p.Diff != nil {
+			diff, err = p.Diff.Diff(ctx)
+			if err != nil {
+				return result, p.fail(ctx, fmt.Errorf("read diff for correction %d: %w", attempt+1, err))
+			}
+		}
+		correction := fmt.Sprintf("Original objective:\n%s\n\nAttempt %d verification failed. Correct the worktree using these exact diagnostics:\n%s\n%v\n\nCurrent diff:\n%s\n\nModify only files inside the active repository.", truncate(prompt, 100000), attempt+1, truncate(diagnostics, 100000), verifyErr, truncate(diff, 100000))
 		if _, err := p.Worker.Run(ctx, correction); err != nil {
 			return result, p.fail(ctx, fmt.Errorf("correction %d failed: %w", attempt+1, err))
 		}
 	}
 	if !p.SkipReview && p.Reviewer != nil {
 		p.progress("3/4", "Running Tech Lead cleanup...")
+		if p.Diff == nil {
+			return result, p.fail(ctx, fmt.Errorf("pipeline requires diff source for review"))
+		}
 		diff, err := p.Diff.Diff(ctx)
 		if err != nil {
 			return result, p.fail(ctx, err)
 		}
 		result.ReviewerSummary, err = p.Reviewer.Run(ctx, TechLeadPrompt+"\n\nApply necessary edits directly to the worktree.\n\n"+truncate(diff, 100000))
+		result.ReviewerSummary = truncate(result.ReviewerSummary, 8192)
 		if err != nil {
 			return result, p.fail(ctx, fmt.Errorf("review failed: %w", err))
 		}
@@ -85,7 +97,9 @@ func (p *Pipeline) fail(ctx context.Context, cause error) error {
 	if p.Rollback == nil {
 		return cause
 	}
-	if err := p.Rollback(ctx); err != nil {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := p.Rollback(rollbackCtx); err != nil {
 		return fmt.Errorf("%v; automatic rollback also failed: %w", cause, err)
 	}
 	return cause
@@ -97,18 +111,34 @@ func (p *Pipeline) progress(step, msg string) {
 }
 
 type CommandVerifier struct {
-	Root  string
-	Build Command
-	Lint  func(context.Context) (string, error)
+	Root   string
+	Build  Command
+	Lint   func(context.Context) (string, error)
+	Runner ProcessRunner
+}
+
+type ProcessRunner interface {
+	Run(context.Context, string, string, ...string) (string, error)
+}
+
+type ExecProcessRunner struct{}
+
+func (ExecProcessRunner) Run(ctx context.Context, dir, executable string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, executable, args...)
+	cmd.Dir = dir
+	b, err := cmd.CombinedOutput()
+	return string(b), err
 }
 
 func (v CommandVerifier) Verify(ctx context.Context) (string, error) {
 	var output strings.Builder
 	if v.Build.Executable != "" {
-		cmd := exec.CommandContext(ctx, v.Build.Executable, v.Build.Args...)
-		cmd.Dir = v.Root
-		b, err := cmd.CombinedOutput()
-		output.Write(b)
+		runner := v.Runner
+		if runner == nil {
+			runner = ExecProcessRunner{}
+		}
+		text, err := runner.Run(ctx, v.Root, v.Build.Executable, v.Build.Args...)
+		output.WriteString(text)
 		if err != nil {
 			return output.String(), fmt.Errorf("build command failed: %w", err)
 		}

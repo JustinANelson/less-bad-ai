@@ -50,3 +50,103 @@ func TestAllowedImportsActAsWhitelist(t *testing.T) {
 		t.Fatalf("expected whitelist violation, got %#v", d)
 	}
 }
+
+func TestScanParsesDependencyManifests(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"go.mod": `module example.com/app
+
+// example.com/commented v1.0.0
+require (
+	example.com/allowed v1.0.0
+	example.com/blocked v1.2.3 // indirect
+)
+`,
+		"package.json": `{
+  "description": "blocked-description-only",
+  "peerDependencies": {"blocked-peer": "^1.0.0"},
+  "optionalDependencies": {"blocked-optional": "^2.0.0"}
+}`,
+		"pom.xml": `<project>
+  <description>blocked-description-only</description>
+  <dependencies>
+    <dependency><groupId>com.example</groupId><artifactId>blocked-artifact</artifactId></dependency>
+  </dependencies>
+</project>`,
+	}
+	var paths []string
+	for rel, body := range files {
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, rel)
+	}
+	cfg := DefaultConfig()
+	cfg.ForbiddenDependencies = []ForbiddenDependency{
+		{Name: "example.com/blocked"},
+		{Name: "blocked-peer"},
+		{Name: "blocked-optional"},
+		{Name: "com.example:blocked-artifact"},
+		{Name: "example.com/commented"},
+		{Name: "blocked-description-only"},
+	}
+	diagnostics, err := Scan(root, paths, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diagnostics) != 4 {
+		t.Fatalf("got %d diagnostics, want 4: %#v", len(diagnostics), diagnostics)
+	}
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Offender == "example.com/commented" || diagnostic.Offender == "blocked-description-only" {
+			t.Fatalf("non-dependency text produced a diagnostic: %#v", diagnostic)
+		}
+	}
+}
+
+func TestScanRejectsMalformedManifest(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "pom.xml")
+	if err := os.WriteFile(path, []byte(`<project><dependency>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.ForbiddenDependencies = []ForbiddenDependency{{Name: "blocked"}}
+	if _, err := Scan(root, []string{"pom.xml"}, cfg); err == nil {
+		t.Fatal("Scan accepted malformed pom.xml")
+	}
+}
+
+func TestJavaScriptImportsIgnoreCommentsAndOrdinaryStrings(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "imports.ts")
+	source := `
+const examples = "require('string-only') and import('also-string-only')";
+const url = "https://example.com/module";
+// require('comment-only')
+/* import blocked from 'block-comment-only'; */
+import client from 'real-static';
+const lazy = import('real-dynamic');
+const legacy = require('real-require');
+`
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	imports, err := ExtractImports(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Import{
+		{Name: "real-static", Line: 6},
+		{Name: "real-dynamic", Line: 7},
+		{Name: "real-require", Line: 8},
+	}
+	if len(imports) != len(want) {
+		t.Fatalf("imports = %#v, want %#v", imports, want)
+	}
+	for i := range want {
+		if imports[i] != want[i] {
+			t.Fatalf("imports = %#v, want %#v", imports, want)
+		}
+	}
+}
