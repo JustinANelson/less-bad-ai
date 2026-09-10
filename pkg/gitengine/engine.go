@@ -80,8 +80,13 @@ func (e *Engine) Begin(ctx context.Context, opts BeginOptions) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	if previous, err := LoadState(root); err == nil && previous.Status == StatusInProgress {
-		return Plan{}, fmt.Errorf("transaction %s is already in progress", previous.TransactionID)
+	previous, stateErr := LoadState(root)
+	if stateErr == nil {
+		if previous.Status == StatusInProgress || previous.Status == StatusRecoveryRequired {
+			return Plan{}, fmt.Errorf("transaction %s is not finished (status %s)", previous.TransactionID, previous.Status)
+		}
+	} else if !errors.Is(stateErr, ErrNoTransaction) {
+		return Plan{}, fmt.Errorf("inspect previous transaction: %w", stateErr)
 	}
 	headOut, err := e.git(ctx, root, "rev-parse", "HEAD")
 	if err != nil {
@@ -93,6 +98,10 @@ func (e *Engine) Begin(ctx context.Context, opts BeginOptions) (Plan, error) {
 		return Plan{}, err
 	}
 	dirty := len(bytes.TrimSpace(statusOut)) > 0
+	untrackedOut, err := e.git(ctx, root, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return Plan{}, fmt.Errorf("list pre-transaction untracked files: %w", err)
+	}
 	now := e.now().UTC()
 	id := e.newID()
 	snapshot := fmt.Sprintf("refs/lbai/snapshots/%d-%s", now.Unix(), id)
@@ -100,6 +109,10 @@ func (e *Engine) Begin(ctx context.Context, opts BeginOptions) (Plan, error) {
 		Version: stateVersion, TransactionID: id, Repository: root,
 		LastCleanHead: head, SnapshotRef: snapshot, Timestamp: now,
 		Status: StatusInProgress, Prompt: opts.Prompt,
+		PreservedUntracked: nulSeparatedPaths(untrackedOut),
+	}
+	if dirty {
+		state.StashRef = fmt.Sprintf("refs/lbai/stash/%s", id)
 	}
 	plan := Plan{Root: root, Head: head, SnapshotRef: snapshot, Dirty: dirty, State: state}
 	if opts.DryRun {
@@ -109,7 +122,6 @@ func (e *Engine) Begin(ctx context.Context, opts BeginOptions) (Plan, error) {
 		return Plan{}, fmt.Errorf("create snapshot ref: %w", err)
 	}
 	if dirty {
-		stashRef := fmt.Sprintf("refs/lbai/stash/%s", id)
 		if _, err := e.git(ctx, root, "stash", "push", "--include-untracked", "--message", "lbai "+id); err != nil {
 			e.deleteRef(ctx, root, snapshot)
 			return Plan{}, fmt.Errorf("stash existing changes: %w", err)
@@ -119,14 +131,13 @@ func (e *Engine) Begin(ctx context.Context, opts BeginOptions) (Plan, error) {
 			e.deleteRef(ctx, root, snapshot)
 			return Plan{}, fmt.Errorf("resolve saved changes: %w", err)
 		}
-		if _, err := e.git(ctx, root, "update-ref", stashRef, strings.TrimSpace(string(stashSHA)), ""); err != nil {
+		if _, err := e.git(ctx, root, "update-ref", state.StashRef, strings.TrimSpace(string(stashSHA)), ""); err != nil {
 			e.deleteRef(ctx, root, snapshot)
 			return Plan{}, fmt.Errorf("retain saved changes: %w", err)
 		}
 		if _, err := e.git(ctx, root, "stash", "drop", "stash@{0}"); err != nil {
 			return Plan{}, fmt.Errorf("detach saved changes from stash stack: %w", err)
 		}
-		state.StashRef = stashRef
 		plan.State = state
 	}
 	if err := saveState(root, state); err != nil {
@@ -144,11 +155,11 @@ func (e *Engine) CaptureCreatedFiles(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	out, err := e.git(ctx, root, "ls-files", "--others", "--exclude-standard")
+	out, err := e.git(ctx, root, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return err
 	}
-	state.CreatedFiles = nonemptyLines(out)
+	state.CreatedFiles = transactionOwnedPaths(nulSeparatedPaths(out), state.PreservedUntracked, state.CreatedFiles)
 	return saveState(root, state)
 }
 
@@ -161,6 +172,11 @@ func (e *Engine) Complete(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	untrackedOut, err := e.git(ctx, root, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return fmt.Errorf("record transaction-created files: %w", err)
+	}
+	state.CreatedFiles = transactionOwnedPaths(nulSeparatedPaths(untrackedOut), state.PreservedUntracked, state.CreatedFiles)
 	if err := e.restoreStash(ctx, root, &state); err != nil {
 		state.Status, state.Error = StatusRecoveryRequired, err.Error()
 		_ = saveState(root, state)
@@ -184,6 +200,17 @@ func (e *Engine) Undo(ctx context.Context, hard bool) (State, error) {
 	}
 	if _, err := e.git(ctx, root, "cat-file", "-e", state.LastCleanHead+"^{commit}"); err != nil {
 		return State{}, fmt.Errorf("pre-run commit is unavailable: %w", err)
+	}
+	// Discover untracked files immediately before resetting an active run. This
+	// is essential on failure paths, which can roll back before
+	// CaptureCreatedFiles is called. Once a run is complete, newly appearing
+	// untracked files belong to the user and must not be added to the cleanup set.
+	if state.Status == StatusInProgress || state.Status == StatusRecoveryRequired {
+		untrackedOut, err := e.git(ctx, root, "ls-files", "--others", "--exclude-standard", "-z")
+		if err != nil {
+			return State{}, fmt.Errorf("list transaction-created files: %w", err)
+		}
+		state.CreatedFiles = transactionOwnedPaths(nulSeparatedPaths(untrackedOut), state.PreservedUntracked, state.CreatedFiles)
 	}
 	if _, err := e.git(ctx, root, "reset", "--hard", state.LastCleanHead); err != nil {
 		return State{}, fmt.Errorf("reset to pre-run commit: %w", err)
@@ -262,12 +289,35 @@ func (e *Engine) deleteRef(ctx context.Context, root, ref string) error {
 	_, err := e.git(ctx, root, "update-ref", "-d", ref)
 	return err
 }
-func nonemptyLines(b []byte) []string {
-	var out []string
-	for _, s := range strings.Split(strings.TrimSpace(string(b)), "\n") {
-		if s = strings.TrimSpace(s); s != "" {
-			out = append(out, s)
+func nulSeparatedPaths(b []byte) []string {
+	parts := bytes.Split(b, []byte{0})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if len(part) != 0 {
+			out = append(out, filepath.ToSlash(string(part)))
 		}
 	}
+	return out
+}
+
+func transactionOwnedPaths(current, preserved, recorded []string) []string {
+	preserve := make(map[string]struct{}, len(preserved))
+	for _, path := range preserved {
+		preserve[filepath.ToSlash(path)] = struct{}{}
+	}
+	owned := make(map[string]struct{}, len(current)+len(recorded))
+	for _, paths := range [][]string{current, recorded} {
+		for _, path := range paths {
+			path = filepath.ToSlash(path)
+			if _, userOwned := preserve[path]; !userOwned {
+				owned[path] = struct{}{}
+			}
+		}
+	}
+	out := make([]string, 0, len(owned))
+	for path := range owned {
+		out = append(out, path)
+	}
+	sort.Strings(out)
 	return out
 }

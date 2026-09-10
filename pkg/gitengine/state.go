@@ -11,6 +11,8 @@ import (
 
 const stateVersion = 1
 
+var ErrNoTransaction = errors.New("no less-bad-ai transaction found")
+
 type Status string
 
 const (
@@ -30,8 +32,12 @@ type State struct {
 	Timestamp     time.Time `json:"timestamp"`
 	Status        Status    `json:"status"`
 	Prompt        string    `json:"prompt"`
-	CreatedFiles  []string  `json:"created_files,omitempty"`
-	Error         string    `json:"error,omitempty"`
+	// PreservedUntracked records user-owned untracked files that existed before
+	// the transaction. Undo must never mistake them for agent-created files after
+	// a successful run restores the user's dirty worktree.
+	PreservedUntracked []string `json:"preserved_untracked,omitempty"`
+	CreatedFiles       []string `json:"created_files,omitempty"`
+	Error              string   `json:"error,omitempty"`
 }
 
 func statePath(root string) string { return filepath.Join(root, ".lbai", "state.json") }
@@ -40,7 +46,7 @@ func LoadState(root string) (State, error) {
 	b, err := os.ReadFile(statePath(root))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return State{}, fmt.Errorf("no less-bad-ai transaction found")
+			return State{}, ErrNoTransaction
 		}
 		return State{}, fmt.Errorf("read transaction state: %w", err)
 	}
