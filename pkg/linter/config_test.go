@@ -61,3 +61,21 @@ allowed_extensions = [".go"]
 		t.Fatalf("explicit config = %#v", cfg)
 	}
 }
+
+func TestLoadConfigRejectsUnknownRuleFields(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".lbai"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rules := `[archetype]
+name = "custom"
+version = "1"
+allowed_extension = [".go"]
+`
+	if err := os.WriteFile(filepath.Join(root, ".lbai", "rules.toml"), []byte(rules), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(root); err == nil {
+		t.Fatal("LoadConfig accepted an unknown rules field")
+	}
+}

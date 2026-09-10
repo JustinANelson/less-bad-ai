@@ -3,8 +3,6 @@ package runner
 import (
 	"context"
 	"fmt"
-	"os/exec"
-	"strings"
 	"time"
 )
 
@@ -108,47 +106,4 @@ func (p *Pipeline) progress(step, msg string) {
 	if p.Progress != nil {
 		p.Progress(step, msg)
 	}
-}
-
-type CommandVerifier struct {
-	Root   string
-	Build  Command
-	Lint   func(context.Context) (string, error)
-	Runner ProcessRunner
-}
-
-type ProcessRunner interface {
-	Run(context.Context, string, string, ...string) (string, error)
-}
-
-type ExecProcessRunner struct{}
-
-func (ExecProcessRunner) Run(ctx context.Context, dir, executable string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, executable, args...)
-	cmd.Dir = dir
-	b, err := cmd.CombinedOutput()
-	return string(b), err
-}
-
-func (v CommandVerifier) Verify(ctx context.Context) (string, error) {
-	var output strings.Builder
-	if v.Build.Executable != "" {
-		runner := v.Runner
-		if runner == nil {
-			runner = ExecProcessRunner{}
-		}
-		text, err := runner.Run(ctx, v.Root, v.Build.Executable, v.Build.Args...)
-		output.WriteString(text)
-		if err != nil {
-			return output.String(), fmt.Errorf("build command failed: %w", err)
-		}
-	}
-	if v.Lint != nil {
-		s, err := v.Lint(ctx)
-		output.WriteString(s)
-		if err != nil {
-			return output.String(), err
-		}
-	}
-	return output.String(), nil
 }

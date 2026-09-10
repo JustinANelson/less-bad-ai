@@ -147,25 +147,3 @@ func TestPipelineCancellationUsesFreshRollbackContext(t *testing.T) {
 		t.Fatal("rollback was not called")
 	}
 }
-
-type recordingProcessRunner struct {
-	dir, executable string
-	args            []string
-}
-
-func (r *recordingProcessRunner) Run(_ context.Context, dir, executable string, args ...string) (string, error) {
-	r.dir, r.executable, r.args = dir, executable, append([]string(nil), args...)
-	return "build output", nil
-}
-
-func TestCommandVerifierUsesInjectedProcessRunner(t *testing.T) {
-	runner := &recordingProcessRunner{}
-	verifier := CommandVerifier{Root: "repo", Build: Command{Executable: "go", Args: []string{"test", "./..."}}, Runner: runner}
-	output, err := verifier.Verify(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if output != "build output" || runner.dir != "repo" || runner.executable != "go" || strings.Join(runner.args, " ") != "test ./..." {
-		t.Fatalf("unexpected invocation: %#v output=%q", runner, output)
-	}
-}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"sort"
 	"strings"
 )
@@ -21,6 +22,19 @@ type VerificationCheck struct {
 type GraphVerifier struct {
 	Checks      []VerificationCheck
 	MaxParallel int
+}
+
+type ProcessRunner interface {
+	Run(context.Context, string, string, ...string) (string, error)
+}
+
+type ExecProcessRunner struct{}
+
+func (ExecProcessRunner) Run(ctx context.Context, dir, executable string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, executable, args...)
+	cmd.Dir = dir
+	b, err := cmd.CombinedOutput()
+	return string(b), err
 }
 
 type checkResult struct {
@@ -123,7 +137,13 @@ func validateVerificationChecks(checks []VerificationCheck) error {
 }
 
 func validateDependencyGraph(graph map[string][]string) error {
-	for name, dependencies := range graph {
+	names := make([]string, 0, len(graph))
+	for name := range graph {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		dependencies := graph[name]
 		for _, dependency := range dependencies {
 			if dependency == name {
 				return fmt.Errorf("verification check %q depends on itself", name)
@@ -151,11 +171,6 @@ func validateDependencyGraph(graph map[string][]string) error {
 		state[name] = 2
 		return nil
 	}
-	names := make([]string, 0, len(graph))
-	for name := range graph {
-		names = append(names, name)
-	}
-	sort.Strings(names)
 	for _, name := range names {
 		if err := visit(name); err != nil {
 			return err

@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +17,6 @@ import (
 type Config struct {
 	Worker   AgentConfig   `toml:"worker"`
 	Reviewer AgentConfig   `toml:"reviewer"`
-	Build    Command       `toml:"build,omitempty"`
 	Checks   []CheckConfig `toml:"checks,omitempty"`
 }
 
@@ -26,11 +26,6 @@ type AgentConfig struct {
 	Endpoint  string   `toml:"endpoint"`
 	Model     string   `toml:"model"`
 	APIKeyEnv string   `toml:"api_key_env"`
-}
-
-type Command struct {
-	Executable string   `toml:"executable"`
-	Args       []string `toml:"args"`
 }
 
 type CheckConfig struct {
@@ -50,7 +45,8 @@ func LoadConfig(root string) (Config, error) {
 		return Config{}, fmt.Errorf("read runner config: %w", err)
 	}
 	var cfg Config
-	if err := toml.Unmarshal(b, &cfg); err != nil {
+	decoder := toml.NewDecoder(bytes.NewReader(b)).DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode runner config: %w", err)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -241,20 +237,6 @@ func WriteConfig(root string, cfg Config) (string, error) {
 	return path, nil
 }
 
-// VerificationChecks returns the configured graph, or adapts the phase-3
-// legacy [build] table into a single named check.
-func (c Config) VerificationChecks() []CheckConfig {
-	if len(c.Checks) > 0 {
-		out := make([]CheckConfig, len(c.Checks))
-		copy(out, c.Checks)
-		return out
-	}
-	if c.Build.Executable == "" {
-		return nil
-	}
-	return []CheckConfig{{Name: "build", Executable: c.Build.Executable, Args: append([]string(nil), c.Build.Args...)}}
-}
-
 func (c Config) Validate() error {
 	if err := c.Worker.Validate(); err != nil {
 		return fmt.Errorf("worker: %w", err)
@@ -263,12 +245,6 @@ func (c Config) Validate() error {
 		if err := c.Reviewer.Validate(); err != nil {
 			return fmt.Errorf("reviewer: %w", err)
 		}
-	}
-	if c.Build.Executable != "" && len(c.Checks) > 0 {
-		return errors.New("configure either legacy [build] or [[checks]], not both")
-	}
-	if c.Build.Executable == "" && len(c.Build.Args) > 0 {
-		return errors.New("build args require a build executable")
 	}
 	graph := make(map[string][]string, len(c.Checks))
 	for i, check := range c.Checks {

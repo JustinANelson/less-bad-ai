@@ -1,5 +1,11 @@
 package linter
 
-import "github.com/pelletier/go-toml/v2"
+import (
+	"bytes"
 
-func decodeTOML(b []byte, v any) error { return toml.Unmarshal(b, v) }
+	"github.com/pelletier/go-toml/v2"
+)
+
+func decodeTOML(b []byte, v any) error {
+	return toml.NewDecoder(bytes.NewReader(b)).DisallowUnknownFields().Decode(v)
+}

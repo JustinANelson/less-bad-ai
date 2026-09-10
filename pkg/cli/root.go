@@ -60,9 +60,9 @@ func (a *app) initCommand() *cobra.Command {
 		}
 		fmt.Fprintf(a.out, "[lbai] Wrote %s\n", path)
 		fmt.Fprintf(a.out, "[lbai] Worker: %s\n", strings.Join(cfg.Worker.Command, " "))
-		checks := cfg.VerificationChecks()
+		checks := cfg.Checks
 		if len(checks) == 0 {
-			fmt.Fprintln(a.out, "[lbai] Build: none detected; configure [build] to enforce project verification")
+			fmt.Fprintln(a.out, "[lbai] Checks: none detected; configure [[checks]] to enforce project verification")
 		} else {
 			for _, check := range checks {
 				fmt.Fprintf(a.out, "[lbai] Check %s: %s\n", check.Name, strings.Join(append([]string{check.Executable}, check.Args...), " "))
@@ -118,7 +118,7 @@ func (a *app) runCommand() *cobra.Command {
 				return err
 			}
 		}
-		configuredChecks := runCfg.VerificationChecks()
+		configuredChecks := runCfg.Checks
 		verificationChecks := runner.CommandVerificationChecks(root, configuredChecks, nil)
 		verificationChecks = append(verificationChecks, runner.VerificationCheck{Name: "architecture", Run: func(ctx context.Context) (string, error) {
 			paths, err := changedPaths(ctx, root, plan.Head)

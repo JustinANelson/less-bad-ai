@@ -57,9 +57,9 @@ args = ["test", "-tags=integration", "./..."]
 depends_on = ["test"]
 ```
 
-The earlier `[build]` table remains supported as a single check. Configure
-either `[build]` or `[[checks]]`, not both. The `architecture` check name is
-reserved for LBAI's automatic boundary scan.
+The `architecture` check name is reserved for LBAI's automatic boundary scan.
+Configuration is strict: obsolete or misspelled fields fail before a transaction
+starts instead of silently disabling verification.
 
 Command providers edit the worktree directly. OpenAI-compatible HTTP providers must return one JSON object; free-form or Markdown-wrapped responses are rejected. Writes and deletes are confined to the repository, and `.git` plus LBAI runtime recovery state are protected.
 

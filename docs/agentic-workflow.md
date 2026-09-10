@@ -36,9 +36,8 @@ violations visible. An explicit path audit continues to report every violation.
 Represent project verification as named checks with explicit dependencies.
 Execute independent checks concurrently with bounded parallelism, but collect
 output and errors in stable name order. A failed check prevents its dependents
-from running. The legacy `[build]` configuration maps to one check; `[[checks]]`
-is the graph form, and the two forms cannot be combined. Architectural scanning
-is always an LBAI-owned graph node.
+from running. `[[checks]]` is the only project-command configuration form.
+Architectural scanning is always an LBAI-owned graph node.
 
 ### CLI flag collision
 

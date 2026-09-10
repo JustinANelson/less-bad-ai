@@ -60,14 +60,6 @@ func TestDiscoverChecksUsesNodeLockfileAndScripts(t *testing.T) {
 	}
 }
 
-func TestVerificationChecksPreservesLegacyBuild(t *testing.T) {
-	cfg := Config{Build: Command{Executable: "go", Args: []string{"test", "./..."}}}
-	want := []CheckConfig{{Name: "build", Executable: "go", Args: []string{"test", "./..."}}}
-	if got := cfg.VerificationChecks(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("checks = %#v, want %#v", got, want)
-	}
-}
-
 func TestConfigRejectsInvalidCheckGraph(t *testing.T) {
 	base := Config{Worker: AgentConfig{Type: "command", Command: []string{"agent"}}}
 	for _, checks := range [][]CheckConfig{
@@ -82,11 +74,20 @@ func TestConfigRejectsInvalidCheckGraph(t *testing.T) {
 			t.Fatalf("Validate accepted %#v", checks)
 		}
 	}
-	withBoth := base
-	withBoth.Build = Command{Executable: "go", Args: []string{"test", "./..."}}
-	withBoth.Checks = []CheckConfig{{Name: "vet", Executable: "go"}}
-	if err := withBoth.Validate(); err == nil {
-		t.Fatal("Validate accepted both build and checks")
+}
+
+func TestLoadConfigRejectsRemovedBuildTable(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFixture(t, root, filepath.Join(".lbai", "config.toml"), `[worker]
+type = "command"
+command = ["agent"]
+
+[build]
+executable = "go"
+args = ["test", "./..."]
+`)
+	if _, err := LoadConfig(root); err == nil {
+		t.Fatal("LoadConfig accepted removed [build] configuration")
 	}
 }
 
@@ -135,6 +136,9 @@ func lookupOnly(names ...string) executableLookup {
 func writeConfigFixture(t *testing.T, root, name, content string) {
 	t.Helper()
 	path := filepath.Join(root, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

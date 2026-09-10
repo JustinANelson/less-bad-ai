@@ -9,6 +9,16 @@ import (
 	"time"
 )
 
+type recordingProcessRunner struct {
+	dir, executable string
+	args            []string
+}
+
+func (r *recordingProcessRunner) Run(_ context.Context, dir, executable string, args ...string) (string, error) {
+	r.dir, r.executable, r.args = dir, executable, append([]string(nil), args...)
+	return "check output", nil
+}
+
 func TestGraphVerifierRunsIndependentChecksConcurrentlyAndOrdersOutput(t *testing.T) {
 	started := make(chan string, 2)
 	release := make(chan struct{})
