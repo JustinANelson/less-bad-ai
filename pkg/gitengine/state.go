@@ -14,12 +14,17 @@ const stateVersion = 1
 var ErrNoTransaction = errors.New("no less-bad-ai transaction found")
 
 type Status string
+type Phase string
 
 const (
 	StatusInProgress       Status = "in_progress"
 	StatusComplete         Status = "complete"
 	StatusRolledBack       Status = "rolled_back"
 	StatusRecoveryRequired Status = "recovery_required"
+
+	PhaseSnapshotCreated Phase = "snapshot_created"
+	PhaseStashing        Phase = "stashing"
+	PhaseReady           Phase = "ready"
 )
 
 type State struct {
@@ -31,6 +36,7 @@ type State struct {
 	StashRef      string    `json:"stash_ref,omitempty"`
 	Timestamp     time.Time `json:"timestamp"`
 	Status        Status    `json:"status"`
+	Phase         Phase     `json:"phase,omitempty"`
 	Prompt        string    `json:"prompt"`
 	// PreservedUntracked records user-owned untracked files that existed before
 	// the transaction. Undo must never mistake them for agent-created files after
@@ -91,14 +97,8 @@ func saveState(root string, state State) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temporary state: %w", err)
 	}
-	if err := os.Rename(tmpName, statePath(root)); err != nil {
-		// Windows cannot atomically replace an existing file.
-		if removeErr := os.Remove(statePath(root)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			return fmt.Errorf("replace transaction state: %w", err)
-		}
-		if err := os.Rename(tmpName, statePath(root)); err != nil {
-			return fmt.Errorf("replace transaction state: %w", err)
-		}
+	if err := replaceFileAtomically(tmpName, statePath(root)); err != nil {
+		return fmt.Errorf("replace transaction state: %w", err)
 	}
 	return nil
 }

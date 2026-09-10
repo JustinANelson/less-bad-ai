@@ -133,6 +133,11 @@ func TestDirtyWorktreeIsRestored(t *testing.T) {
 
 func TestDryRunDoesNotWriteStateOrRefs(t *testing.T) {
 	root := gitFixture(t)
+	excludePath := filepath.Join(root, ".git", "info", "exclude")
+	excludeBefore, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "dry-run-user.txt"), []byte("keep"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -154,6 +159,105 @@ func TestDryRunDoesNotWriteStateOrRefs(t *testing.T) {
 		t.Fatal("dry run wrote snapshot ref")
 	}
 	assertFileContent(t, filepath.Join(root, "dry-run-user.txt"), "keep")
+	excludeAfter, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(excludeAfter) != string(excludeBefore) {
+		t.Fatal("dry run modified Git's local exclude file")
+	}
+}
+
+func TestBeginKeepsRuntimeJournalOutOfDirtyStash(t *testing.T) {
+	root := gitFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("user change"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := New(root)
+	e.NewID = func() string { return "journal-exclude" }
+	plan, err := e.Begin(context.Background(), BeginOptions{Prompt: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := LoadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Phase != PhaseReady || plan.State.Phase != PhaseReady {
+		t.Fatalf("transaction phase = %q, plan phase = %q", state.Phase, plan.State.Phase)
+	}
+	if status := runGit(t, root, "status", "--porcelain=v1", "--untracked-files=all"); status != "" {
+		t.Fatalf("runtime state dirtied transaction worktree:\n%s", status)
+	}
+	if ignored := runGit(t, root, "check-ignore", ".lbai/state.json"); ignored != ".lbai/state.json" {
+		t.Fatalf("state journal is not locally excluded: %q", ignored)
+	}
+	if _, err := e.Undo(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, filepath.Join(root, "tracked.txt"), "user change")
+}
+
+func TestBeginDoesNotTreatLegacyUnignoredJournalAsUserChanges(t *testing.T) {
+	root := gitFixture(t)
+	previous := State{
+		Version: stateVersion, TransactionID: "previous", Repository: root,
+		LastCleanHead: runGit(t, root, "rev-parse", "HEAD"), SnapshotRef: "refs/lbai/snapshots/previous",
+		Timestamp: time.Now().UTC(), Status: StatusComplete,
+	}
+	if err := saveState(root, previous); err != nil {
+		t.Fatal(err)
+	}
+	e := New(root)
+	e.NewID = func() string { return "upgrade" }
+	plan, err := e.Begin(context.Background(), BeginOptions{Prompt: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Dirty || plan.State.StashRef != "" {
+		t.Fatalf("legacy runtime journal was treated as user work: %#v", plan)
+	}
+	if _, err := e.Undo(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUndoRecoversInterruptionBeforeStashPush(t *testing.T) {
+	root := interruptedDirtyFixture(t, "before-stash", PhaseStashing)
+	e := New(root)
+	if _, err := e.Undo(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	assertInterruptedUserChanges(t, root)
+	assertMissingRef(t, root, "refs/stash")
+	assertMissingRef(t, root, "refs/lbai/stash/before-stash")
+}
+
+func TestUndoRecoversInterruptionAfterStashPush(t *testing.T) {
+	root := interruptedDirtyFixture(t, "after-stash", PhaseStashing)
+	runGit(t, root, "stash", "push", "--include-untracked", "--message", "lbai after-stash")
+	if _, err := os.Stat(statePath(root)); err != nil {
+		t.Fatalf("stash removed recovery journal: %v", err)
+	}
+	if _, err := New(root).Undo(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	assertInterruptedUserChanges(t, root)
+	assertMissingRef(t, root, "refs/stash")
+	assertMissingRef(t, root, "refs/lbai/stash/after-stash")
+}
+
+func TestUndoRecoversInterruptionBeforeStashDrop(t *testing.T) {
+	root := interruptedDirtyFixture(t, "before-drop", PhaseStashing)
+	runGit(t, root, "stash", "push", "--include-untracked", "--message", "lbai before-drop")
+	sha := runGit(t, root, "rev-parse", "refs/stash")
+	runGit(t, root, "update-ref", "refs/lbai/stash/before-drop", sha, "")
+	if _, err := New(root).Undo(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	assertInterruptedUserChanges(t, root)
+	assertMissingRef(t, root, "refs/stash")
+	assertMissingRef(t, root, "refs/lbai/stash/before-drop")
 }
 
 func TestTransactionFromNestedDirectoryAtDetachedHead(t *testing.T) {
@@ -213,6 +317,32 @@ func TestLoadStateRejectsCorruptState(t *testing.T) {
 	}
 	if _, err := New(root).Begin(context.Background(), BeginOptions{Prompt: "agent"}); err == nil || !strings.Contains(err.Error(), "inspect previous transaction") {
 		t.Fatalf("Begin error = %v", err)
+	}
+}
+
+func TestSaveStateAtomicallyReplacesExistingJournal(t *testing.T) {
+	root := t.TempDir()
+	state := State{Version: stateVersion, TransactionID: "atomic", Repository: root, LastCleanHead: strings.Repeat("a", 40), SnapshotRef: "refs/lbai/snapshots/atomic", Timestamp: time.Now().UTC(), Status: StatusInProgress, Phase: PhaseReady}
+	if err := saveState(root, state); err != nil {
+		t.Fatal(err)
+	}
+	state.Status, state.Phase = StatusComplete, ""
+	if err := saveState(root, state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != StatusComplete || loaded.TransactionID != state.TransactionID {
+		t.Fatalf("loaded state = %#v", loaded)
+	}
+	temporary, err := filepath.Glob(filepath.Join(root, ".lbai", "state-*.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(temporary) != 0 {
+		t.Fatalf("temporary state files remain: %v", temporary)
 	}
 }
 
@@ -302,7 +432,7 @@ func TestBeginStateWriteFailureRemovesSnapshotRef(t *testing.T) {
 	e.Now = func() time.Time { return time.Unix(1700000002, 0) }
 	e.NewID = func() string { return "state-failure" }
 
-	if _, err := e.Begin(context.Background(), BeginOptions{Prompt: "agent"}); err == nil || !strings.Contains(err.Error(), "save transaction state") {
+	if _, err := e.Begin(context.Background(), BeginOptions{Prompt: "agent"}); err == nil || !strings.Contains(err.Error(), "save snapshot state") {
 		t.Fatalf("Begin error = %v", err)
 	}
 	assertMissingRef(t, root, "refs/lbai/snapshots/1700000002-state-failure")
@@ -389,5 +519,46 @@ func assertMissingRef(t *testing.T, root, ref string) {
 	cmd.Dir = root
 	if err := cmd.Run(); err == nil {
 		t.Fatalf("Git ref still exists: %s", ref)
+	}
+}
+
+func interruptedDirtyFixture(t *testing.T, id string, phase Phase) string {
+	t.Helper()
+	root := gitFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("user tracked change"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "user note.txt"), []byte("user untracked change"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := New(root)
+	if err := e.ensureRuntimeExcluded(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	head := runGit(t, root, "rev-parse", "HEAD")
+	snapshot := "refs/lbai/snapshots/" + id
+	runGit(t, root, "update-ref", snapshot, head, "")
+	state := State{
+		Version: stateVersion, TransactionID: id, Repository: root,
+		LastCleanHead: head, SnapshotRef: snapshot, StashRef: "refs/lbai/stash/" + id,
+		Timestamp: time.Now().UTC(), Status: StatusInProgress, Phase: phase, Prompt: "agent",
+		PreservedUntracked: []string{"user note.txt"},
+	}
+	if err := saveState(root, state); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func assertInterruptedUserChanges(t *testing.T, root string) {
+	t.Helper()
+	assertFileContent(t, filepath.Join(root, "tracked.txt"), "user tracked change")
+	assertFileContent(t, filepath.Join(root, "user note.txt"), "user untracked change")
+	state, err := LoadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != StatusRolledBack || state.Phase != "" || state.StashRef != "" {
+		t.Fatalf("unexpected recovered state: %#v", state)
 	}
 }

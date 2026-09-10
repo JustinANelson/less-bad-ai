@@ -74,6 +74,7 @@ The final fixed-width ASCII summary reports touched module directories, checked 
 ## Safety model
 
 - Existing dirty changes, including untracked files, are retained under a transaction-specific Git ref and restored after success or rollback.
+- Snapshot and stash startup phases are journaled in `.lbai/state.json`; interrupted startup is recovered before any hard reset. Runtime paths are added to Git's local exclude file without modifying the project's tracked ignore rules.
 - Automatic rollback removes only files recorded as created by the active transaction unless `--hard` is supplied.
 - The dashboard listens on loopback only. Its rollback route requires POST, a same-origin request, and a per-process token.
 - Dashboard trace context is redacted and length-limited before it crosses the HTTP API boundary; full prompts remain in the versioned trace store.
