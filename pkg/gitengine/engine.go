@@ -32,10 +32,11 @@ func (ExecCommander) Run(ctx context.Context, dir, name string, args ...string) 
 }
 
 type Engine struct {
-	Dir   string
-	Git   Commander
-	Now   func() time.Time
-	NewID func() string
+	Dir       string
+	Git       Commander
+	Now       func() time.Time
+	NewID     func() string
+	SaveState func(string, State) error
 }
 
 type BeginOptions struct {
@@ -126,13 +127,13 @@ func (e *Engine) Begin(ctx context.Context, opts BeginOptions) (Plan, error) {
 	if _, err := e.git(ctx, root, "update-ref", snapshot, head, ""); err != nil {
 		return Plan{}, fmt.Errorf("create snapshot ref: %w", err)
 	}
-	if err := saveState(root, state); err != nil {
+	if err := e.saveState(root, state); err != nil {
 		cleanupErr := e.deleteRef(ctx, root, snapshot)
 		return Plan{}, joinOperationError("save snapshot state", err, cleanupErr)
 	}
 	if dirty {
 		state.Phase = PhaseStashing
-		if err := saveState(root, state); err != nil {
+		if err := e.saveState(root, state); err != nil {
 			cleanupErr := e.abortBegin(ctx, root, snapshot, "", false, "")
 			cleanupErr = errors.Join(cleanupErr, e.recordBeginFailure(root, &state, cleanupErr))
 			return Plan{}, joinOperationError("save stashing state", err, cleanupErr)
@@ -162,7 +163,7 @@ func (e *Engine) Begin(ctx context.Context, opts BeginOptions) (Plan, error) {
 	}
 	state.Phase = PhaseReady
 	plan.State = state
-	if err := saveState(root, state); err != nil {
+	if err := e.saveState(root, state); err != nil {
 		changesRef := ""
 		if dirty {
 			changesRef = state.StashRef
@@ -188,7 +189,7 @@ func (e *Engine) CaptureCreatedFiles(ctx context.Context) error {
 		return err
 	}
 	state.CreatedFiles = transactionOwnedPaths(nulSeparatedPaths(out), state.PreservedUntracked, state.CreatedFiles)
-	return saveState(root, state)
+	return e.saveState(root, state)
 }
 
 func (e *Engine) Complete(ctx context.Context) error {
@@ -207,11 +208,11 @@ func (e *Engine) Complete(ctx context.Context) error {
 	state.CreatedFiles = transactionOwnedPaths(nulSeparatedPaths(untrackedOut), state.PreservedUntracked, state.CreatedFiles)
 	if err := e.restoreStash(ctx, root, &state); err != nil {
 		state.Status, state.Error = StatusRecoveryRequired, err.Error()
-		_ = saveState(root, state)
+		_ = e.saveState(root, state)
 		return err
 	}
 	state.Status, state.Phase = StatusComplete, ""
-	return saveState(root, state)
+	return e.saveState(root, state)
 }
 
 func (e *Engine) Undo(ctx context.Context, hard bool) (State, error) {
@@ -232,7 +233,7 @@ func (e *Engine) Undo(ctx context.Context, hard bool) (State, error) {
 	if state.StashRef != "" {
 		if err := e.prepareStashRecovery(ctx, root, &state); err != nil {
 			state.Status, state.Error = StatusRecoveryRequired, err.Error()
-			_ = saveState(root, state)
+			_ = e.saveState(root, state)
 			return state, err
 		}
 	}
@@ -259,11 +260,11 @@ func (e *Engine) Undo(ctx context.Context, hard bool) (State, error) {
 	}
 	if err := e.restoreStash(ctx, root, &state); err != nil {
 		state.Status, state.Error = StatusRecoveryRequired, err.Error()
-		_ = saveState(root, state)
+		_ = e.saveState(root, state)
 		return state, err
 	}
 	state.Status, state.Phase, state.Error = StatusRolledBack, "", ""
-	if err := saveState(root, state); err != nil {
+	if err := e.saveState(root, state); err != nil {
 		return State{}, err
 	}
 	return state, nil
@@ -299,7 +300,7 @@ func (e *Engine) prepareStashRecovery(ctx context.Context, root string, state *S
 			}
 		}
 		state.Phase = PhaseReady
-		return saveState(root, *state)
+		return e.saveState(root, *state)
 	}
 	if stackRef == "" && (state.Phase == PhaseSnapshotCreated || state.Phase == PhaseStashing) {
 		status, err := e.git(ctx, root, "status", "--porcelain=v1", "--untracked-files=all")
@@ -327,7 +328,7 @@ func (e *Engine) prepareStashRecovery(ctx context.Context, root string, state *S
 		return fmt.Errorf("detach recovered stash from stack: %w", err)
 	}
 	state.Phase = PhaseReady
-	if err := saveState(root, *state); err != nil {
+	if err := e.saveState(root, *state); err != nil {
 		return fmt.Errorf("save recovered stash state: %w", err)
 	}
 	return nil
@@ -451,7 +452,14 @@ func (e *Engine) recordBeginFailure(root string, state *State, cleanupErr error)
 		state.StashRef = ""
 		state.Error = ""
 	}
-	return saveState(root, *state)
+	return e.saveState(root, *state)
+}
+
+func (e *Engine) saveState(root string, state State) error {
+	if e.SaveState != nil {
+		return e.SaveState(root, state)
+	}
+	return saveState(root, state)
 }
 
 // abortBegin restores user changes after a partially completed Begin. Refs are

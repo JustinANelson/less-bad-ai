@@ -2,6 +2,7 @@ package gitengine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -423,14 +424,10 @@ func TestBeginStashRefCollisionRestoresDirtyWorktree(t *testing.T) {
 
 func TestBeginStateWriteFailureRemovesSnapshotRef(t *testing.T) {
 	root := gitFixture(t)
-	if err := os.WriteFile(filepath.Join(root, ".lbai"), []byte("blocks state directory"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, root, "add", ".lbai")
-	runGit(t, root, "commit", "-m", "block state directory")
 	e := New(root)
 	e.Now = func() time.Time { return time.Unix(1700000002, 0) }
 	e.NewID = func() string { return "state-failure" }
+	e.SaveState = func(string, State) error { return errors.New("injected state write failure") }
 
 	if _, err := e.Begin(context.Background(), BeginOptions{Prompt: "agent"}); err == nil || !strings.Contains(err.Error(), "save snapshot state") {
 		t.Fatalf("Begin error = %v", err)
