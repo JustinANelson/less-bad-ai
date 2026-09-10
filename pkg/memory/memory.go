@@ -7,12 +7,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 )
 
 const TraceVersion = 1
+
+var commitSHA = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
 type Trace struct {
 	Version               int       `json:"version"`
@@ -159,7 +162,18 @@ func updateDocs(root string, t Trace) error {
 	arch = replaceMarkdownSection(arch, "Topology", "The repository topology is derived from source imports by `lbai ui`.")
 	decision := fmt.Sprintf("- %s: %s (`%s`)", t.Timestamp.Format(time.RFC3339), t.ADRDecision, short(t.CommitSHA))
 	if existing := markdownSectionBody(arch, "Recent Decisions"); existing != "" {
-		decision += "\n" + existing
+		alreadyRecorded := false
+		for _, line := range strings.Split(existing, "\n") {
+			if strings.TrimSpace(line) == decision {
+				alreadyRecorded = true
+				break
+			}
+		}
+		if alreadyRecorded {
+			decision = existing
+		} else {
+			decision += "\n" + existing
+		}
 	}
 	arch = replaceMarkdownSection(arch, "Recent Decisions", decision)
 	if err := os.WriteFile(archPath, []byte(arch), 0o644); err != nil {
@@ -312,12 +326,24 @@ func validateGeneratedSubject(subject string) error {
 }
 
 func validateTrace(t Trace) error {
-	if t.Version != TraceVersion || t.TraceID == "" || t.CommitSHA == "" || t.Timestamp.IsZero() {
-		return fmt.Errorf("invalid trace: version, trace_id, commit_sha, and timestamp are required")
+	if t.Version != TraceVersion || t.TraceID == "" || !commitSHA.MatchString(t.CommitSHA) || t.Timestamp.IsZero() || strings.TrimSpace(t.ADRDecision) == "" {
+		return fmt.Errorf("invalid trace: version, trace_id, commit_sha, timestamp, and adr_decision are required")
 	}
 	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(t.TracePath)))
-	if !strings.HasPrefix(clean, ".lbai/traces/") || strings.HasPrefix(clean, "../") || filepath.IsAbs(t.TracePath) {
+	if clean != filepath.ToSlash(t.TracePath) || !strings.HasPrefix(clean, ".lbai/traces/") || !strings.HasSuffix(clean, ".json") || strings.HasPrefix(clean, "../") || filepath.IsAbs(t.TracePath) {
 		return fmt.Errorf("invalid trace path %q", t.TracePath)
+	}
+	if len(t.TouchedFiles) == 0 || !sort.StringsAreSorted(t.TouchedFiles) {
+		return fmt.Errorf("invalid trace: touched_files must be non-empty and sorted")
+	}
+	for i, path := range t.TouchedFiles {
+		cleanPath := filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
+		if cleanPath != path || cleanPath == "." || strings.HasPrefix(cleanPath, "../") || filepath.IsAbs(path) {
+			return fmt.Errorf("invalid trace touched path %q", path)
+		}
+		if i > 0 && path == t.TouchedFiles[i-1] {
+			return fmt.Errorf("invalid trace: duplicate touched path %q", path)
+		}
 	}
 	return nil
 }
