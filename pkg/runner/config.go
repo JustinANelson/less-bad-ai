@@ -84,13 +84,14 @@ func discoverAgent(lookPath executableLookup) (AgentConfig, error) {
 		{Type: "command", Command: []string{"codex", "exec", "--sandbox", "workspace-write", "--ephemeral"}},
 		{Type: "command", Command: []string{"claude", "-p", "--permission-mode", "acceptEdits"}},
 		{Type: "command", Command: []string{"aider", "--yes", "--message"}},
+		{Type: "command", Command: []string{"gemini", "--yolo", "-p"}},
 	}
 	for _, candidate := range candidates {
 		if _, err := lookPath(candidate.Command[0]); err == nil {
 			return candidate, nil
 		}
 	}
-	return AgentConfig{}, errors.New("no supported coding agent found; install codex, claude, or aider, or create .lbai/config.toml")
+	return AgentConfig{}, errors.New("no supported coding agent found; install codex, claude, aider, or gemini, or create .lbai/config.toml")
 }
 
 func discoverChecks(root string, lookPath executableLookup) []CheckConfig {
@@ -108,10 +109,16 @@ func discoverChecks(root string, lookPath executableLookup) []CheckConfig {
 		}
 	}
 	if regularFile(filepath.Join(root, "go.mod")) && executableAvailable("go", lookPath) {
-		return []CheckConfig{
+		checks := []CheckConfig{
 			{Name: "test", Executable: "go", Args: []string{"test", "./..."}},
 			{Name: "vet", Executable: "go", Args: []string{"vet", "./..."}},
 		}
+		// golangci-lint is additive: it only runs when already installed, so
+		// projects without it see no new failure mode.
+		if executableAvailable("golangci-lint", lookPath) {
+			checks = append(checks, CheckConfig{Name: "golangci-lint", Executable: "golangci-lint", Args: []string{"run"}})
+		}
+		return checks
 	}
 	if wrapper := discoverWrapper(root, "gradlew"); wrapper != "" {
 		return []CheckConfig{{Name: "test", Executable: wrapper, Args: []string{"test"}}}
@@ -122,7 +129,11 @@ func discoverChecks(root string, lookPath executableLookup) []CheckConfig {
 	if hasPytestConfig(root) {
 		for _, executable := range []string{"python3", "python"} {
 			if executableAvailable(executable, lookPath) {
-				return []CheckConfig{{Name: "test", Executable: executable, Args: []string{"-m", "pytest"}}}
+				checks := []CheckConfig{{Name: "test", Executable: executable, Args: []string{"-m", "pytest"}}}
+				if executableAvailable("ruff", lookPath) {
+					checks = append(checks, CheckConfig{Name: "ruff", Executable: "ruff", Args: []string{"check", "."}})
+				}
+				return checks
 			}
 		}
 	}

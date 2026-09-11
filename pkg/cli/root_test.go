@@ -229,6 +229,16 @@ func TestRunSuggestsSetupWhenBaselineIsMissing(t *testing.T) {
 	}
 }
 
+func TestWithProjectContextPrependsMemoryWithoutMutatingRawPrompt(t *testing.T) {
+	if got := withProjectContext("add validation", ""); got != "add validation" {
+		t.Fatalf("expected prompt unchanged when there is no project memory, got %q", got)
+	}
+	got := withProjectContext("add validation", "## Recent project decisions\n\n- used gofmt")
+	if !strings.Contains(got, "used gofmt") || !strings.Contains(got, "add validation") {
+		t.Fatalf("expected augmented prompt to contain both memory and the raw task, got %q", got)
+	}
+}
+
 func TestVersionCommandSupportsTextAndJSON(t *testing.T) {
 	oldVersion, oldCommit, oldDate := Version, Commit, BuildDate
 	Version, Commit, BuildDate = "v1.2.3", "abc123", "2026-09-10T20:00:00Z"

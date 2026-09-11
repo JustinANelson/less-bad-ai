@@ -174,6 +174,40 @@ export function EmptyState() {
 	}
 }
 
+func TestPythonImportsCoverPlainFromAndMultiNameForms(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "app.py")
+	source := `import os
+import a.b.c as abc, sys
+from collections import OrderedDict, defaultdict
+from . import sibling
+# import commented_out
+url = "https://example.com/#import-not-real"
+`
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	imports, err := ExtractImports(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Import{
+		{Name: "os", Line: 1},
+		{Name: "a.b.c", Line: 2},
+		{Name: "sys", Line: 2},
+		{Name: "collections", Line: 3},
+		{Name: ".", Line: 4},
+	}
+	if len(imports) != len(want) {
+		t.Fatalf("imports = %#v, want %#v", imports, want)
+	}
+	for i := range want {
+		if imports[i] != want[i] {
+			t.Fatalf("imports = %#v, want %#v", imports, want)
+		}
+	}
+}
+
 func TestRegressionsIgnoresLegacyViolationsAndLineMovement(t *testing.T) {
 	legacy := Diagnostic{Path: "pkg/service.go", Line: 4, Rule: "direction", Violation: "forbidden", Offender: "app/cmd/tool", Severity: "error", Hint: "old hint"}
 	newViolation := Diagnostic{Path: "pkg/service.go", Line: 9, Rule: "direction", Violation: "forbidden", Offender: "app/cmd/new", Severity: "error"}

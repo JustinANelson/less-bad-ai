@@ -40,6 +40,26 @@ func TestLoadConfigDiscoversSafeGoBoundaries(t *testing.T) {
 	}
 }
 
+func TestDiscoverConfigDetectsPythonProject(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "pyproject.toml"), []byte("[project]\nname = \"example\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DiscoverConfig(root)
+	if cfg.Archetype.Name != "automatic-python" {
+		t.Fatalf("archetype = %#v, want automatic-python", cfg.Archetype)
+	}
+	found := false
+	for _, ext := range cfg.Archetype.AllowedExtensions {
+		if ext == ".py" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("allowed extensions missing .py: %#v", cfg.Archetype.AllowedExtensions)
+	}
+}
+
 func TestLoadConfigExplicitRulesTakePrecedence(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".lbai"), 0o755); err != nil {

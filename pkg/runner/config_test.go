@@ -46,6 +46,18 @@ func TestDiscoverConfigUsesProviderPriorityAndRequiresAgent(t *testing.T) {
 	}
 }
 
+func TestDiscoverConfigFallsBackToGemini(t *testing.T) {
+	root := t.TempDir()
+	cfg, err := discoverConfig(root, lookupOnly("gemini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"gemini", "--yolo", "-p"}
+	if !reflect.DeepEqual(cfg.Worker.Command, want) {
+		t.Fatalf("worker command = %#v, want %#v", cfg.Worker.Command, want)
+	}
+}
+
 func TestDiscoverChecksUsesNodeLockfileAndScripts(t *testing.T) {
 	root := t.TempDir()
 	writeConfigFixture(t, root, "package.json", `{"scripts":{"test":"vitest","build":"vite build"}}`)
@@ -67,6 +79,44 @@ func TestDiscoverChecksUsesNPMRunForPackageScripts(t *testing.T) {
 	want := []CheckConfig{
 		{Name: "build", Executable: "npm", Args: []string{"run", "build"}},
 		{Name: "lint", Executable: "npm", Args: []string{"run", "lint"}},
+	}
+	if !reflect.DeepEqual(checks, want) {
+		t.Fatalf("checks = %#v, want %#v", checks, want)
+	}
+}
+
+func TestDiscoverChecksAddsGolangciLintWhenInstalled(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFixture(t, root, "go.mod", "module example.com/project\n")
+	checks := discoverChecks(root, lookupOnly("go", "golangci-lint"))
+	want := []CheckConfig{
+		{Name: "test", Executable: "go", Args: []string{"test", "./..."}},
+		{Name: "vet", Executable: "go", Args: []string{"vet", "./..."}},
+		{Name: "golangci-lint", Executable: "golangci-lint", Args: []string{"run"}},
+	}
+	if !reflect.DeepEqual(checks, want) {
+		t.Fatalf("checks = %#v, want %#v", checks, want)
+	}
+}
+
+func TestDiscoverChecksOmitsGolangciLintWhenNotInstalled(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFixture(t, root, "go.mod", "module example.com/project\n")
+	checks := discoverChecks(root, lookupOnly("go"))
+	for _, c := range checks {
+		if c.Name == "golangci-lint" {
+			t.Fatalf("did not expect golangci-lint when it is not installed: %#v", checks)
+		}
+	}
+}
+
+func TestDiscoverChecksAddsRuffCheckWhenInstalled(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFixture(t, root, "pytest.ini", "[pytest]\n")
+	checks := discoverChecks(root, lookupOnly("python3", "ruff"))
+	want := []CheckConfig{
+		{Name: "test", Executable: "python3", Args: []string{"-m", "pytest"}},
+		{Name: "ruff", Executable: "ruff", Args: []string{"check", "."}},
 	}
 	if !reflect.DeepEqual(checks, want) {
 		t.Fatalf("checks = %#v, want %#v", checks, want)

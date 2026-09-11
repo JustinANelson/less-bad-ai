@@ -65,7 +65,7 @@ discovery. Run `lbai version` to inspect an installed build.
 ## Configure
 
 Configuration is optional when a supported coding-agent CLI is installed. `lbai`
-auto-detects `codex`, `claude`, or `aider` (in that order), along with common
+auto-detects `codex`, `claude`, `aider`, or `gemini` (in that order), along with common
 Go, Rust, Maven, Gradle, Node, and Python test commands. Detection is read-only.
 `lbai setup` is the recommended first-run experience; use `lbai init` only to
 persist configuration inside an existing Git repository without bootstrapping it.
@@ -101,6 +101,24 @@ deterministic output; `depends_on` delays a check until its prerequisites pass.
 When setup starts from an empty project and therefore finds no checks, each run
 discovers them again after the worker writes files. A newly created `go.mod`,
 `package.json`, or other supported manifest is verified in that same transaction.
+Zero-config check discovery also adds `golangci-lint` for Go projects and
+`ruff check` for Python projects when those tools are already installed;
+neither is required, and their absence introduces no new failure mode.
+
+Before every verification pass, `lbai` best-effort auto-formats changed files
+in place with the zero-install formatter for their language when one is
+available on the machine (`gofmt` for Go, `prettier` for JS/TS, `ruff format`
+or `black` for Python, `rustfmt` for Rust). This keeps generated code
+consistently formatted without asking the worker or reviewer to do it, and a
+missing or failing formatter never fails the run.
+
+Review is fail-closed by default: a run requires a configured reviewer and a
+readable transaction diff, and reviewer output that reports a Git inspection
+failure rolls the transaction back. Use `--skip-review` to deliberately omit
+review; generated traces and decision records then say that review was skipped.
+Command agents receive a process-local Git `safe.directory` entry for only the
+active repository, avoiding ownership mismatches without changing global Git
+configuration.
 
 ```toml
 [[checks]]
@@ -166,6 +184,8 @@ arguments with spaces, which avoids shell-specific quoting surprises.
 `lbai run --dry-run "prompt"` plans the snapshot without changing files or refs. `lbai undo --hard` additionally removes all untracked files and should be used only when broad cleanup is intended.
 
 On success, `lbai` creates a verified code commit followed by a memory commit. The second commit records `ARCHITECTURE.md`, `AI_CONTEXT.md`, `docs/decisions/LOG.md`, and `.lbai/traces/<timestamp>_<code-sha>.json`. This two-commit protocol avoids the impossible requirement for a commit to contain its own SHA while keeping `lbai undo` atomic from the developer's perspective.
+
+Every run feeds that recorded memory back in: `lbai run` prepends a bounded summary of `ARCHITECTURE.md`'s recent decisions and `AI_CONTEXT.md`'s last verified change to both the worker's and the tech lead reviewer's prompts, so later runs stay consistent with earlier ones instead of starting from a blank slate. This only affects the prompt sent to agents; the commit message and trace still record your literal request.
 
 The final fixed-width ASCII summary reports touched module directories, checked invariants, review outcome, commit, and undo command. `lbai ui` renders the same run as an embedded SVG dependency graph without external browser assets.
 

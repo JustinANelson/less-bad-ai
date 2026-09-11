@@ -32,7 +32,11 @@ type Diagnostic struct {
 }
 
 var (
-	javaImport = regexp.MustCompile(`^\s*import\s+(?:static\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$*][\w$*]*)*)\s*;?`)
+	javaImport      = regexp.MustCompile(`^\s*import\s+(?:static\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$*][\w$*]*)*)\s*;?`)
+	pythonPlainImp  = regexp.MustCompile(`^\s*import\s+(.+)$`)
+	pythonFromImp   = regexp.MustCompile(`^\s*from\s+(\.*[\w.]*)\s+import\b`)
+	pythonImportAs  = regexp.MustCompile(`\s+as\s+\w+\s*$`)
+	pythonModuleSeg = regexp.MustCompile(`^\.*[\w.]+$`)
 )
 
 func ExtractImports(path string) ([]Import, error) {
@@ -44,6 +48,8 @@ func ExtractImports(path string) ([]Import, error) {
 		return lineImports(path, javaImport)
 	case ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs":
 		return javascriptImports(path)
+	case ".py":
+		return pythonImports(path)
 	default:
 		return nil, nil
 	}
@@ -215,6 +221,49 @@ func goImports(path string) ([]Import, error) {
 		imports = append(imports, Import{Name: value, Line: fset.Position(spec.Pos()).Line})
 	}
 	return imports, nil
+}
+
+// pythonImports handles the two Python import statement forms:
+// "import a.b.c[, d.e as x]" and "from a.b import c, d". It does not
+// tokenize the file, so a "#" inside a string literal on an import line
+// could be misread as a comment; this matches the level of rigor already
+// used by the Java/JS scanners above for their own edge cases.
+func pythonImports(path string) ([]Import, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var out []Import
+	s := bufio.NewScanner(f)
+	line := 0
+	for s.Scan() {
+		line++
+		text := stripPythonComment(s.Text())
+		if m := pythonFromImp.FindStringSubmatch(text); m != nil {
+			if module := strings.TrimSpace(m[1]); module != "" {
+				out = append(out, Import{Name: module, Line: line})
+			}
+			continue
+		}
+		if m := pythonPlainImp.FindStringSubmatch(text); m != nil {
+			for _, segment := range strings.Split(m[1], ",") {
+				segment = pythonImportAs.ReplaceAllString(strings.TrimSpace(segment), "")
+				segment = strings.TrimSpace(segment)
+				if pythonModuleSeg.MatchString(segment) {
+					out = append(out, Import{Name: segment, Line: line})
+				}
+			}
+		}
+	}
+	return out, s.Err()
+}
+
+func stripPythonComment(s string) string {
+	if i := strings.Index(s, "#"); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 func lineImports(path string, re *regexp.Regexp) ([]Import, error) {

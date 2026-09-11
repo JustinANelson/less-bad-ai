@@ -12,6 +12,37 @@ import (
 	"testing"
 )
 
+func TestGitSafeDirectoryEnvPreservesExistingCommandConfig(t *testing.T) {
+	environ := []string{
+		"PATH=test",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.sslVerify",
+		"GIT_CONFIG_VALUE_0=false",
+	}
+	got := gitSafeDirectoryEnv(environ, `C:\work\project`)
+	want := map[string]string{
+		"GIT_CONFIG_COUNT":   "2",
+		"GIT_CONFIG_KEY_0":   "http.sslVerify",
+		"GIT_CONFIG_VALUE_0": "false",
+		"GIT_CONFIG_KEY_1":   "safe.directory",
+		"GIT_CONFIG_VALUE_1": `C:\work\project`,
+	}
+	for _, entry := range got {
+		key, value, found := strings.Cut(entry, "=")
+		if found {
+			if expected, exists := want[key]; exists {
+				if value != expected {
+					t.Fatalf("%s = %q, want %q", key, value, expected)
+				}
+				delete(want, key)
+			}
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("environment omitted values: %#v", want)
+	}
+}
+
 func TestOpenAIAgentAppliesStructuredResponse(t *testing.T) {
 	root := t.TempDir()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

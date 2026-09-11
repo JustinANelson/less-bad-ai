@@ -25,6 +25,7 @@ type Trace struct {
 	UserPrompt            string    `json:"user_prompt"`
 	WorkerSummary         string    `json:"worker_summary"`
 	TechLeadModifications string    `json:"tech_lead_modifications"`
+	FormatSummary         string    `json:"format_summary,omitempty"`
 	TouchedFiles          []string  `json:"touched_files"`
 	ADRDecision           string    `json:"adr_decision"`
 	TracePath             string    `json:"-"`
@@ -46,7 +47,10 @@ func (ExecGitRunner) Run(ctx context.Context, root string, args ...string) ([]by
 	return git(ctx, root, args...)
 }
 
-type FinalizeOptions struct{ Base, Prompt, WorkerSummary, ReviewerSummary, Message string }
+type FinalizeOptions struct {
+	Base, Prompt, WorkerSummary, ReviewerSummary, FormatSummary, Message string
+	Reviewed                                                             bool
+}
 type FinalizeResult struct {
 	CodeCommit, MetadataCommit, TracePath string
 	TouchedFiles                          []string
@@ -91,7 +95,11 @@ func (f Finalizer) Finalize(ctx context.Context, o FinalizeOptions) (FinalizeRes
 	name := timestamp.Format("20060102T150405Z") + "_" + short(sha) + ".json"
 	rel := filepath.ToSlash(filepath.Join(".lbai", "traces", name))
 	result.TracePath = rel
-	trace := Trace{Version: TraceVersion, TraceID: traceID, CommitSHA: sha, Timestamp: timestamp, UserPrompt: o.Prompt, WorkerSummary: o.WorkerSummary, TechLeadModifications: o.ReviewerSummary, TouchedFiles: files, ADRDecision: "Changes were generated, validated, reviewed, and accepted by the configured transaction pipeline.", TracePath: rel}
+	decision := "Changes were generated, validated, and accepted by the configured transaction pipeline; tech-lead review was explicitly skipped."
+	if o.Reviewed {
+		decision = "Changes were generated, validated, reviewed, and accepted by the configured transaction pipeline."
+	}
+	trace := Trace{Version: TraceVersion, TraceID: traceID, CommitSHA: sha, Timestamp: timestamp, UserPrompt: o.Prompt, WorkerSummary: o.WorkerSummary, TechLeadModifications: o.ReviewerSummary, FormatSummary: o.FormatSummary, TouchedFiles: files, ADRDecision: decision, TracePath: rel}
 	if err := writeTrace(f.Root, trace); err != nil {
 		return result, err
 	}
@@ -310,9 +318,21 @@ func synthesizeMessage(files []string, prompt string) string {
 	available := 72 - len([]rune(prefix))
 	runes := []rune(summary)
 	if len(runes) > available {
-		summary = strings.TrimSpace(string(runes[:available]))
+		summary = truncateAtWord(summary, available)
 	}
 	return prefix + summary
+}
+
+func truncateAtWord(summary string, limit int) string {
+	runes := []rune(summary)
+	if len(runes) <= limit {
+		return strings.TrimSpace(summary)
+	}
+	truncated := strings.TrimSpace(string(runes[:limit]))
+	if boundary := strings.LastIndexAny(truncated, " \t"); boundary > 0 {
+		truncated = strings.TrimSpace(truncated[:boundary])
+	}
+	return strings.TrimRight(truncated, ".,;:-")
 }
 
 func validateGeneratedSubject(subject string) error {

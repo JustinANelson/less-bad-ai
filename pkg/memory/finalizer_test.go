@@ -23,7 +23,7 @@ func TestFinalizerCreatesLinkedCodeAndMetadataCommits(t *testing.T) {
 	now := time.Date(2026, 9, 10, 15, 4, 5, 123, time.UTC)
 	nowCalls := 0
 	result, err := (Finalizer{Root: root, Now: func() time.Time { nowCalls++; return now }}).Finalize(context.Background(), FinalizeOptions{
-		Base: base, Prompt: "Add feature support", WorkerSummary: "Added feature support.", ReviewerSummary: "No changes required.",
+		Base: base, Prompt: "Add feature support", WorkerSummary: "Added feature support.", ReviewerSummary: "No changes required.", Reviewed: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -48,6 +48,9 @@ func TestFinalizerCreatesLinkedCodeAndMetadataCommits(t *testing.T) {
 	if trace.CommitSHA != result.CodeCommit || trace.TraceID != "lbai-"+strconv.FormatInt(now.UnixNano(), 10) {
 		t.Fatalf("trace does not identify code commit: %#v", trace)
 	}
+	if !strings.Contains(trace.ADRDecision, "validated, reviewed, and accepted") {
+		t.Fatalf("reviewed trace decision = %q", trace.ADRDecision)
+	}
 	if commandSucceeds(root, "git", "cat-file", "-e", result.CodeCommit+":"+result.TracePath) {
 		t.Fatal("trace was included in the code commit")
 	}
@@ -57,6 +60,27 @@ func TestFinalizerCreatesLinkedCodeAndMetadataCommits(t *testing.T) {
 	}
 	if status := runMemoryGit(t, root, "status", "--porcelain"); status != "" {
 		t.Fatalf("finalized repository is dirty:\n%s", status)
+	}
+}
+
+func TestFinalizerRecordsExplicitlySkippedReview(t *testing.T) {
+	root, base := memoryGitFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "feature.go"), []byte("package feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (Finalizer{Root: root, Now: func() time.Time { return time.Date(2026, 9, 10, 15, 4, 5, 0, time.UTC) }}).Finalize(context.Background(), FinalizeOptions{
+		Base: base, Prompt: "Add feature support", WorkerSummary: "Added feature support.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	traceBytes := []byte(runMemoryGit(t, root, "show", result.MetadataCommit+":"+result.TracePath))
+	var trace Trace
+	if err := json.Unmarshal(traceBytes, &trace); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(trace.ADRDecision, "review was explicitly skipped") || strings.Contains(trace.ADRDecision, "validated, reviewed") {
+		t.Fatalf("skipped-review trace decision = %q", trace.ADRDecision)
 	}
 }
 

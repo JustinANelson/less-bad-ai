@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -44,11 +45,42 @@ func (a *CommandAgent) Run(ctx context.Context, prompt string) (string, error) {
 	args := append(append([]string{}, a.Command[1:]...), prompt)
 	cmd := exec.CommandContext(ctx, a.Command[0], args...)
 	cmd.Dir = a.Root
+	cmd.Env = gitSafeDirectoryEnv(os.Environ(), a.Root)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("agent command: %w: %s", err, truncate(string(out), 8192))
 	}
 	return truncate(strings.TrimSpace(string(out)), 8192), nil
+}
+
+// gitSafeDirectoryEnv trusts only the active transaction root for Git commands
+// launched by the agent. This avoids host/container ownership mismatches without
+// changing the user's global Git configuration.
+func gitSafeDirectoryEnv(environ []string, root string) []string {
+	count := 0
+	for _, entry := range environ {
+		key, value, found := strings.Cut(entry, "=")
+		if found && strings.EqualFold(key, "GIT_CONFIG_COUNT") {
+			if parsed, err := strconv.Atoi(value); err == nil && parsed >= 0 {
+				count = parsed
+			}
+		}
+	}
+	environ = setEnv(environ, "GIT_CONFIG_KEY_"+strconv.Itoa(count), "safe.directory")
+	environ = setEnv(environ, "GIT_CONFIG_VALUE_"+strconv.Itoa(count), root)
+	return setEnv(environ, "GIT_CONFIG_COUNT", strconv.Itoa(count+1))
+}
+
+func setEnv(environ []string, key, value string) []string {
+	prefix := key + "="
+	for i := len(environ) - 1; i >= 0; i-- {
+		name, _, found := strings.Cut(environ[i], "=")
+		if found && strings.EqualFold(name, key) {
+			environ[i] = prefix + value
+			return environ
+		}
+	}
+	return append(environ, prefix+value)
 }
 
 type OpenAIAgent struct {

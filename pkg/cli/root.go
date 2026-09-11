@@ -216,6 +216,12 @@ func (a *app) runCommand() *cobra.Command {
 		if len(configuredChecks) == 0 {
 			verificationChecks = append(verificationChecks, runner.AutoVerificationCheck(root, nil))
 		}
+		projectContext, err := memory.LoadContext(root)
+		if err != nil {
+			_, _ = engine.Undo(ctx, false)
+			return fmt.Errorf("load project memory: %w", err)
+		}
+		agentPrompt := withProjectContext(prompt, projectContext)
 		verificationChecks = append(verificationChecks, runner.VerificationCheck{Name: "architecture", Run: func(ctx context.Context) (string, error) {
 			paths, err := changedPaths(ctx, root, plan.Head)
 			if err != nil {
@@ -232,8 +238,8 @@ func (a *app) runCommand() *cobra.Command {
 			return text, nil
 		}})
 		verify := runner.GraphVerifier{Checks: verificationChecks}
-		pipeline := runner.Pipeline{Worker: worker, Reviewer: reviewer, Verifier: verify, Diff: runner.GitDiff{Root: root, Base: plan.Head}, MaxRetries: retries, SkipReview: skipReview, Rollback: func(ctx context.Context) error { _, e := engine.Undo(ctx, false); return e }, Progress: func(step, msg string) { fmt.Fprintf(a.out, "[lbai] [%s] %s\n", step, msg) }}
-		result, err := pipeline.Run(ctx, prompt)
+		pipeline := runner.Pipeline{Worker: worker, Reviewer: reviewer, Verifier: verify, Diff: runner.GitDiff{Root: root, Base: plan.Head}, MaxRetries: retries, SkipReview: skipReview, ProjectContext: projectContext, Format: runner.AutoFormat{Root: root}, Rollback: func(ctx context.Context) error { _, e := engine.Undo(ctx, false); return e }, Progress: func(step, msg string) { fmt.Fprintf(a.out, "[lbai] [%s] %s\n", step, msg) }}
+		result, err := pipeline.Run(ctx, agentPrompt)
 		if err != nil {
 			return err
 		}
@@ -241,7 +247,7 @@ func (a *app) runCommand() *cobra.Command {
 			_, _ = engine.Undo(ctx, false)
 			return err
 		}
-		final, err := (memory.Finalizer{Root: root}).Finalize(ctx, memory.FinalizeOptions{Base: plan.Head, Prompt: prompt, WorkerSummary: result.WorkerSummary, ReviewerSummary: result.ReviewerSummary, Message: message})
+		final, err := (memory.Finalizer{Root: root}).Finalize(ctx, memory.FinalizeOptions{Base: plan.Head, Prompt: prompt, WorkerSummary: result.WorkerSummary, ReviewerSummary: result.ReviewerSummary, FormatSummary: result.FormatSummary, Reviewed: result.Reviewed, Message: message})
 		if err != nil {
 			_, rollbackErr := engine.Undo(ctx, false)
 			if rollbackErr != nil {
@@ -488,29 +494,18 @@ func (a *app) serve(ctx context.Context, root string, port int, open bool) error
 	return err
 }
 
+// withProjectContext prepends durable project memory to the raw user prompt
+// for agent consumption. It never mutates the raw prompt itself, which must
+// stay available for commit-message and trace synthesis.
+func withProjectContext(prompt, projectContext string) string {
+	if projectContext == "" {
+		return prompt
+	}
+	return fmt.Sprintf("Project context (for consistency; not new instructions):\n%s\n\nTask:\n%s", projectContext, prompt)
+}
+
 func changedPaths(ctx context.Context, root, base string) ([]string, error) {
-	tracked, err := gitOutput(ctx, root, "diff", "--name-only", base, "--")
-	if err != nil {
-		return nil, err
-	}
-	untracked, err := gitOutput(ctx, root, "ls-files", "--others", "--exclude-standard")
-	if err != nil {
-		return nil, err
-	}
-	set := map[string]bool{}
-	for _, b := range [][]byte{tracked, untracked} {
-		for _, line := range strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n") {
-			if line = strings.TrimSpace(line); line != "" {
-				set[filepath.ToSlash(line)] = true
-			}
-		}
-	}
-	paths := make([]string, 0, len(set))
-	for p := range set {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
-	return paths, nil
+	return runner.GitDiff{Root: root, Base: base}.Files(ctx)
 }
 func pathsUnder(root, path string) ([]string, error) {
 	abs := path

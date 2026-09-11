@@ -38,7 +38,7 @@ type ForbiddenDependency struct {
 func DefaultConfig() Config {
 	return Config{Archetype: Archetype{
 		Name: "permissive", Version: "1",
-		AllowedExtensions: []string{".go", ".java", ".kt", ".kts", ".js", ".jsx", ".ts", ".tsx"},
+		AllowedExtensions: []string{".go", ".java", ".kt", ".kts", ".js", ".jsx", ".ts", ".tsx", ".py"},
 	}}
 }
 
@@ -86,6 +86,9 @@ func DiscoverConfig(root string) Config {
 		{file: "pom.xml", name: "automatic-jvm"},
 		{file: "build.gradle", name: "automatic-jvm"},
 		{file: "build.gradle.kts", name: "automatic-jvm"},
+		{file: "pyproject.toml", name: "automatic-python"},
+		{file: "requirements.txt", name: "automatic-python"},
+		{file: "setup.py", name: "automatic-python"},
 	} {
 		if info, err := os.Stat(filepath.Join(root, marker.file)); err == nil && info.Mode().IsRegular() {
 			cfg.Archetype.Name = marker.name

@@ -82,6 +82,20 @@ func TestSynthesizeMessageIsConventionalAndBounded(t *testing.T) {
 	}
 }
 
+func TestSynthesizeMessageTruncatesAtWordBoundary(t *testing.T) {
+	prompt := "Create a small ant colony simulator with a queen bee that generates worker bees over time with routine upgrades"
+	message := synthesizeMessage([]string{"src/app.js"}, prompt)
+	if strings.HasSuffix(message, " gen") || strings.HasSuffix(message, "generate") {
+		t.Fatalf("subject was truncated mid-word or beyond the limit: %q", message)
+	}
+	if message != "feat(src): create a small ant colony simulator with a queen bee that" {
+		t.Fatalf("subject = %q", message)
+	}
+	if err := validateGeneratedSubject(message); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWriteTraceRejectsUnsafePath(t *testing.T) {
 	trace := testTrace("trace-1", time.Now().UTC())
 	trace.TracePath = "../outside.json"
