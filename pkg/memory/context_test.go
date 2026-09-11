@@ -33,18 +33,26 @@ func TestLoadContextArchitectureOnly(t *testing.T) {
 	}
 }
 
-func TestLoadContextBothFiles(t *testing.T) {
+// TestLoadContextIgnoresAIContextTranscript locks in a deliberate choice: a
+// live end-to-end run showed that AI_CONTEXT.md's "Latest Verified Change"
+// section holds raw, uncurated command-agent stdout (tool calls, shell
+// output, even embedded error text) rather than a clean summary, and
+// feeding it into a later prompt as "project context" confused that run's
+// agent into believing the described work was already done. LoadContext
+// must not surface it, no matter how noisy it is.
+func TestLoadContextIgnoresAIContextTranscript(t *testing.T) {
 	root := t.TempDir()
 	write(t, root, "ARCHITECTURE.md", "# Architecture\n\n## Recent Decisions\n\n- decision one\n")
-	write(t, root, "AI_CONTEXT.md", "# AI Context\n\n## Latest Verified Change\n\nAdded request validation.\n")
+	write(t, root, "AI_CONTEXT.md", "# AI Context\n\n## Latest Verified Change\n\nLast verified change: 2026-09-11T00:00:00Z\n\nexec\n\"powershell.exe\" -Command '...'\nfatal: detected dubious ownership in repository\n")
 	got, err := LoadContext(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"decision one", "Added request validation.", "Recent project decisions", "Last verified change"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("expected context to contain %q, got %q", want, got)
-		}
+	if !strings.Contains(got, "decision one") {
+		t.Fatalf("expected decisions in context, got %q", got)
+	}
+	if strings.Contains(got, "dubious ownership") || strings.Contains(got, "Latest Verified Change") || strings.Contains(got, "powershell") {
+		t.Fatalf("AI_CONTEXT.md transcript leaked into agent context: %q", got)
 	}
 }
 

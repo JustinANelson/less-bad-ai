@@ -12,25 +12,27 @@ const maxContextChars = 4000
 
 // LoadContext returns a bounded summary of durable project memory suitable
 // for prepending to an agent prompt, so later runs stay consistent with
-// decisions and context recorded by earlier ones. It returns "" (no error)
-// when no memory has been recorded yet, which is the expected state on a
-// project's first run.
+// decisions recorded by earlier ones. It returns "" (no error) when no
+// memory has been recorded yet, which is the expected state on a project's
+// first run.
+//
+// This deliberately reads only ARCHITECTURE.md's "Recent Decisions" section,
+// not AI_CONTEXT.md's "Latest Verified Change". The latter holds the raw,
+// uncurated worker summary (command-agent stdout can include tool-call
+// transcripts, shell output, and even embedded error text), which is prompt
+// noise rather than project memory and was observed in practice to confuse
+// a subsequent run into misreading it as part of the task. Recent Decisions
+// is short, structured, and synthesized by lbai itself, which is what makes
+// it safe to feed back into an agent prompt.
 func LoadContext(root string) (string, error) {
-	var sections []string
-	if body, err := sectionFromFile(root, "ARCHITECTURE.md", "Recent Decisions"); err != nil {
+	body, err := sectionFromFile(root, "ARCHITECTURE.md", "Recent Decisions")
+	if err != nil {
 		return "", err
-	} else if body != "" {
-		sections = append(sections, "## Recent project decisions\n\n"+body)
 	}
-	if body, err := sectionFromFile(root, "AI_CONTEXT.md", "Latest Verified Change"); err != nil {
-		return "", err
-	} else if body != "" {
-		sections = append(sections, "## Last verified change\n\n"+body)
-	}
-	if len(sections) == 0 {
+	if body == "" {
 		return "", nil
 	}
-	return truncate(strings.Join(sections, "\n\n"), maxContextChars), nil
+	return truncate("## Recent project decisions\n\n"+body, maxContextChars), nil
 }
 
 func sectionFromFile(root, name, title string) (string, error) {

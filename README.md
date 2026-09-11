@@ -185,7 +185,7 @@ arguments with spaces, which avoids shell-specific quoting surprises.
 
 On success, `lbai` creates a verified code commit followed by a memory commit. The second commit records `ARCHITECTURE.md`, `AI_CONTEXT.md`, `docs/decisions/LOG.md`, and `.lbai/traces/<timestamp>_<code-sha>.json`. This two-commit protocol avoids the impossible requirement for a commit to contain its own SHA while keeping `lbai undo` atomic from the developer's perspective.
 
-Every run feeds that recorded memory back in: `lbai run` prepends a bounded summary of `ARCHITECTURE.md`'s recent decisions and `AI_CONTEXT.md`'s last verified change to both the worker's and the tech lead reviewer's prompts, so later runs stay consistent with earlier ones instead of starting from a blank slate. This only affects the prompt sent to agents; the commit message and trace still record your literal request.
+Every run feeds that recorded memory back in: `lbai run` prepends a bounded summary of `ARCHITECTURE.md`'s recent decisions to both the worker's and the tech lead reviewer's prompts, so later runs stay consistent with earlier ones instead of starting from a blank slate. This only affects the prompt sent to agents; the commit message and trace still record your literal request. `AI_CONTEXT.md`'s raw worker transcript is deliberately excluded from this feedback loop — it is uncurated command-agent output, not project memory, and feeding it back was found to confuse later runs.
 
 The final fixed-width ASCII summary reports touched module directories, checked invariants, review outcome, commit, and undo command. `lbai ui` renders the same run as an embedded SVG dependency graph without external browser assets.
 
