@@ -112,6 +112,12 @@ or `black` for Python, `rustfmt` for Rust). This keeps generated code
 consistently formatted without asking the worker or reviewer to do it, and a
 missing or failing formatter never fails the run.
 
+A worker attempt that writes no changes counts against `--max-retries` the
+same as a failed build or test, and gets a plain nudge to either make the
+change or explain why none is needed, instead of immediately failing the
+transaction. This absorbs one-off agent flakiness invisibly; only a worker
+that produces no changes across every retry attempt fails the run.
+
 Review is fail-closed by default: a run requires a configured reviewer and a
 readable transaction diff, and reviewer output that reports a Git inspection
 failure rolls the transaction back. Use `--skip-review` to deliberately omit

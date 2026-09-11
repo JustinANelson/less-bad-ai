@@ -61,6 +61,73 @@ func TestPipelineCorrectsAndReviews(t *testing.T) {
 	}
 }
 
+// sequenceFilesDiff scripts Files() results per call, holding the last
+// entry steady once the script runs out (mirroring sequenceVerifier below).
+type sequenceFilesDiff struct {
+	files [][]string
+	calls int
+}
+
+func (d *sequenceFilesDiff) Diff(context.Context) (string, error) { return "diff", nil }
+
+func (d *sequenceFilesDiff) Files(context.Context) ([]string, error) {
+	index := d.calls
+	d.calls++
+	if index < len(d.files) {
+		return d.files[index], nil
+	}
+	return d.files[len(d.files)-1], nil
+}
+
+func TestPipelineRetriesOnNoOpWorkerRun(t *testing.T) {
+	worker := &fakeAgent{}
+	diff := &sequenceFilesDiff{files: [][]string{{}, {"main.go"}}}
+	p := Pipeline{Worker: worker, Verifier: &fakeVerifier{}, Diff: diff, SkipReview: true, MaxRetries: 1}
+	result, err := p.Run(context.Background(), "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Retries != 1 || worker.calls != 2 {
+		t.Fatalf("unexpected execution: retries=%d worker.calls=%d", result.Retries, worker.calls)
+	}
+	if !strings.Contains(worker.prompts[1], "made no changes") {
+		t.Fatalf("correction prompt did not nudge the worker about a no-op attempt: %q", worker.prompts[1])
+	}
+}
+
+func TestPipelineFailsAfterExhaustingNoOpRetries(t *testing.T) {
+	rolled := false
+	worker := &fakeAgent{}
+	diff := &sequenceFilesDiff{files: [][]string{{}}}
+	p := Pipeline{
+		Worker: worker, Verifier: &fakeVerifier{}, Diff: diff, SkipReview: true, MaxRetries: 1,
+		Rollback: func(context.Context) error { rolled = true; return nil },
+	}
+	_, err := p.Run(context.Background(), "work")
+	if err == nil || !strings.Contains(err.Error(), "no changes") {
+		t.Fatalf("Run error = %v, want a no-changes error", err)
+	}
+	if worker.calls != 2 {
+		t.Fatalf("worker.calls = %d, want 2 (one initial attempt plus one correction)", worker.calls)
+	}
+	if !rolled {
+		t.Fatal("rollback was not called")
+	}
+}
+
+func TestPipelineReviewerNoOpIsNotRetried(t *testing.T) {
+	reviewer := &fakeAgent{}
+	verify := &fakeVerifier{}
+	p := Pipeline{Worker: &fakeAgent{}, Reviewer: reviewer, Verifier: verify, Diff: fakeDiff{}}
+	result, err := p.Run(context.Background(), "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Reviewed || reviewer.calls != 1 {
+		t.Fatalf("expected a single, successful review without a retry loop: reviewed=%v calls=%d", result.Reviewed, reviewer.calls)
+	}
+}
+
 func TestPipelineReviewIncludesProjectContext(t *testing.T) {
 	worker := &fakeAgent{}
 	reviewer := &fakeAgent{}

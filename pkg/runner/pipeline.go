@@ -72,21 +72,42 @@ func (p *Pipeline) Run(ctx context.Context, prompt string) (Result, error) {
 		p.runFormat(ctx, &result)
 		p.progress("2/4", "Verifying build & AST boundaries...")
 		diagnostics, verifyErr := p.Verifier.Verify(ctx)
+		noOp := false
 		if verifyErr == nil {
-			break
+			// A worker that writes nothing still "passes" verification
+			// trivially, since there is nothing new to break. Treat that as
+			// a retryable attempt rather than a silent success, so a flaky
+			// no-op gets a nudge instead of failing the whole transaction
+			// with an opaque "agent produced no changes" error later.
+			if p.Diff != nil {
+				if files, err := p.Diff.Files(ctx); err == nil && len(files) == 0 {
+					noOp = true
+				}
+			}
+			if !noOp {
+				break
+			}
 		}
 		if attempt >= max {
+			if noOp {
+				return result, p.fail(ctx, fmt.Errorf("worker made no changes after %d attempt(s); nothing to verify or commit", attempt+1))
+			}
 			return result, p.fail(ctx, fmt.Errorf("verification failed after %d corrections: %w\n%s", attempt, verifyErr, diagnostics))
 		}
 		result.Retries++
-		diff := ""
-		if p.Diff != nil {
-			diff, err = p.Diff.Diff(ctx)
-			if err != nil {
-				return result, p.fail(ctx, fmt.Errorf("read diff for correction %d: %w", attempt+1, err))
+		var correction string
+		if noOp {
+			correction = fmt.Sprintf("Original objective:\n%s\n\nAttempt %d made no changes to the repository. Either make the requested change, or if no change is needed, explicitly note that in a comment or documentation update. Modify only files inside the active repository.", truncate(prompt, 100000), attempt+1)
+		} else {
+			diff := ""
+			if p.Diff != nil {
+				diff, err = p.Diff.Diff(ctx)
+				if err != nil {
+					return result, p.fail(ctx, fmt.Errorf("read diff for correction %d: %w", attempt+1, err))
+				}
 			}
+			correction = fmt.Sprintf("Original objective:\n%s\n\nAttempt %d verification failed. Correct the worktree using these exact diagnostics:\n%s\n%v\n\nCurrent diff:\n%s\n\nModify only files inside the active repository.", truncate(prompt, 100000), attempt+1, truncate(diagnostics, 100000), verifyErr, truncate(diff, 100000))
 		}
-		correction := fmt.Sprintf("Original objective:\n%s\n\nAttempt %d verification failed. Correct the worktree using these exact diagnostics:\n%s\n%v\n\nCurrent diff:\n%s\n\nModify only files inside the active repository.", truncate(prompt, 100000), attempt+1, truncate(diagnostics, 100000), verifyErr, truncate(diff, 100000))
 		if _, err := p.Worker.Run(ctx, correction); err != nil {
 			return result, p.fail(ctx, fmt.Errorf("correction %d failed: %w", attempt+1, err))
 		}
