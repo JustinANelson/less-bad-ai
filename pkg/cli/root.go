@@ -163,7 +163,7 @@ func (a *app) initCommand() *cobra.Command {
 }
 
 func (a *app) runCommand() *cobra.Command {
-	var dry, skipReview, serve bool
+	var dry, skipReview, serve, verbose bool
 	var message, model string
 	var retries int
 	c := &cobra.Command{Use: "run <prompt...>", Aliases: []string{"r", "exec"}, Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
@@ -200,15 +200,13 @@ func (a *app) runCommand() *cobra.Command {
 		}
 		worker, err := runner.NewAgent(runCfg.Worker, root, model)
 		if err != nil {
-			_, _ = engine.Undo(ctx, false)
-			return err
+			return rollbackAndReport(ctx, engine, "the configured coding agent could not be started.", err, verbose)
 		}
 		var reviewer runner.Agent
 		if !skipReview && runCfg.Reviewer.Type != "" {
 			reviewer, err = runner.NewAgent(runCfg.Reviewer, root, model)
 			if err != nil {
-				_, _ = engine.Undo(ctx, false)
-				return err
+				return rollbackAndReport(ctx, engine, "the configured tech-lead reviewer could not be started.", err, verbose)
 			}
 		}
 		configuredChecks := runCfg.Checks
@@ -218,8 +216,7 @@ func (a *app) runCommand() *cobra.Command {
 		}
 		projectContext, err := memory.LoadContext(root)
 		if err != nil {
-			_, _ = engine.Undo(ctx, false)
-			return fmt.Errorf("load project memory: %w", err)
+			return rollbackAndReport(ctx, engine, "project memory could not be read.", err, verbose)
 		}
 		agentPrompt := withProjectContext(prompt, projectContext)
 		verificationChecks = append(verificationChecks, runner.VerificationCheck{Name: "architecture", Run: func(ctx context.Context) (string, error) {
@@ -241,22 +238,17 @@ func (a *app) runCommand() *cobra.Command {
 		pipeline := runner.Pipeline{Worker: worker, Reviewer: reviewer, Verifier: verify, Diff: runner.GitDiff{Root: root, Base: plan.Head}, MaxRetries: retries, SkipReview: skipReview, ProjectContext: projectContext, Format: runner.AutoFormat{Root: root}, Rollback: func(ctx context.Context) error { _, e := engine.Undo(ctx, false); return e }, Progress: func(step, msg string) { fmt.Fprintf(a.out, "[lbai] [%s] %s\n", step, msg) }}
 		result, err := pipeline.Run(ctx, agentPrompt)
 		if err != nil {
-			return err
+			return reportPipelineFailure(err, verbose)
 		}
 		if err := engine.CaptureCreatedFiles(ctx); err != nil {
-			_, _ = engine.Undo(ctx, false)
-			return err
+			return rollbackAndReport(ctx, engine, "the transaction's created files could not be recorded.", err, verbose)
 		}
 		final, err := (memory.Finalizer{Root: root}).Finalize(ctx, memory.FinalizeOptions{Base: plan.Head, Prompt: prompt, WorkerSummary: result.WorkerSummary, ReviewerSummary: result.ReviewerSummary, FormatSummary: result.FormatSummary, Reviewed: result.Reviewed, Message: message})
 		if err != nil {
-			_, rollbackErr := engine.Undo(ctx, false)
-			if rollbackErr != nil {
-				return fmt.Errorf("finalization failed: %v; rollback failed: %w", err, rollbackErr)
-			}
-			return err
+			return rollbackAndReport(ctx, engine, "the verified change could not be committed.", err, verbose)
 		}
 		if err := engine.Complete(ctx); err != nil {
-			return err
+			return recoveryMessage(fmt.Errorf("your change was committed, but finishing the transaction failed: %w", err))
 		}
 		reviewSummary := result.ReviewerSummary
 		if skipReview {
@@ -277,6 +269,7 @@ func (a *app) runCommand() *cobra.Command {
 	c.Flags().StringVar(&model, "model", "", "override the configured model")
 	c.Flags().IntVar(&retries, "max-retries", 3, "maximum worker correction attempts")
 	c.Flags().BoolVar(&skipReview, "skip-review", false, "skip the tech lead review")
+	c.Flags().BoolVar(&verbose, "verbose", false, "show full diagnostic detail on failure instead of a short summary")
 	c.Flags().BoolVar(&serve, "serve", false, "serve the topology dashboard after the run")
 	return c
 }
@@ -502,6 +495,66 @@ func withProjectContext(prompt, projectContext string) string {
 		return prompt
 	}
 	return fmt.Sprintf("Project context (for consistency; not new instructions):\n%s\n\nTask:\n%s", projectContext, prompt)
+}
+
+// stageReasons gives a short, curated reason for each runner.StageError
+// value, so a failed run reads as a plain sentence instead of a wrapped
+// error chain. Anything not listed here (including an untagged error) falls
+// back to a generic reason in reportPipelineFailure.
+var stageReasons = map[string]string{
+	"worker":            "the coding agent could not complete the requested change.",
+	"no-op":             "the coding agent made no changes.",
+	"verification":      "the generated change did not pass verification (build/tests/lint).",
+	"review":            "the tech-lead review step failed.",
+	"review-regression": "the review step's own edits broke verification.",
+	"config":            "the transaction pipeline was misconfigured.",
+}
+
+// reportPipelineFailure turns a Pipeline.Run error into a user-facing
+// message. Rollback for this error has already happened inside Pipeline
+// itself, so unlike rollbackAndReport this never calls engine.Undo.
+func reportPipelineFailure(err error, verbose bool) error {
+	var rollbackFailed *runner.RollbackFailedError
+	if errors.As(err, &rollbackFailed) {
+		return recoveryMessage(err)
+	}
+	reason := "the change could not be completed."
+	var stageErr *runner.StageError
+	if errors.As(err, &stageErr) {
+		if r, ok := stageReasons[stageErr.Stage]; ok {
+			reason = r
+		}
+	}
+	return calmMessage(reason, err, verbose)
+}
+
+// rollbackAndReport rolls back the active transaction and reports the
+// result: a calm, short summary by default when rollback itself succeeds,
+// or full, unconditional detail plus recovery guidance when it does not.
+func rollbackAndReport(ctx context.Context, engine *gitengine.Engine, reason string, cause error, verbose bool) error {
+	if _, rollbackErr := engine.Undo(ctx, false); rollbackErr != nil {
+		return recoveryMessage(&runner.RollbackFailedError{Cause: cause, Rollback: rollbackErr})
+	}
+	return calmMessage(reason, cause, verbose)
+}
+
+// calmMessage is the common-case failure message: reassurance that the
+// repository was restored, a short human reason, and a pointer to more
+// detail rather than dumping it by default. The full underlying error is
+// always available via verbose, or afterward through `lbai log`.
+func calmMessage(reason string, cause error, verbose bool) error {
+	if verbose {
+		return fmt.Errorf("%s\nYour repository has been restored to its pre-run state.\n\nFull detail:\n%v", reason, cause)
+	}
+	return fmt.Errorf("%s\nYour repository has been restored to its pre-run state.\nRun with --verbose for full diagnostic output, or `lbai log` to review recent runs.", reason)
+}
+
+// recoveryMessage is for the rare case where automatic rollback itself did
+// not complete. It always shows full detail and explicit non-destructive
+// guidance, regardless of --verbose: this is exactly when the user needs
+// the raw information, so it must never be shortened.
+func recoveryMessage(cause error) error {
+	return fmt.Errorf("automatic recovery could not fully complete — do NOT run `git reset` or `git clean` yourself.\nRun `lbai status` and check `.lbai/state.json` for exact recovery details.\n\n%v", cause)
 }
 
 func changedPaths(ctx context.Context, root, base string) ([]string, error) {

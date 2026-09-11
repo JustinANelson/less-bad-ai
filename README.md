@@ -217,6 +217,7 @@ supported agents, interpretation, and cleanup.
 
 ## Safety model
 
+- On failure, `lbai run` prints a short, calm summary — not the raw error chain — once the repository has been restored: a one-line reason and a note that you're back to your pre-run state. Pass `--verbose`, or run with the reason unchanged and check `lbai log`, to see full diagnostic detail. The one case that is never shortened, regardless of `--verbose`, is automatic rollback itself failing: that prints full detail unconditionally, along with explicit instructions not to run `git reset`/`git clean` yourself and to check `lbai status`.
 - Existing dirty changes, including untracked files, are retained under a transaction-specific Git ref and restored after success or rollback.
 - Snapshot and stash startup phases are journaled in `.lbai/state.json`; interrupted startup is recovered before any hard reset. Runtime paths are added to Git's local exclude file without modifying the project's tracked ignore rules.
 - Automatic rollback removes only files recorded as created by the active transaction unless `--hard` is supplied.

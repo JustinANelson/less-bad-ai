@@ -107,6 +107,10 @@ func TestPipelineFailsAfterExhaustingNoOpRetries(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no changes") {
 		t.Fatalf("Run error = %v, want a no-changes error", err)
 	}
+	var stageErr *StageError
+	if !errors.As(err, &stageErr) || stageErr.Stage != "no-op" {
+		t.Fatalf("Run error stage = %#v, want \"no-op\"", stageErr)
+	}
 	if worker.calls != 2 {
 		t.Fatalf("worker.calls = %d, want 2 (one initial attempt plus one correction)", worker.calls)
 	}
@@ -267,8 +271,13 @@ func TestPipelineRequiresReviewerUnlessExplicitlySkipped(t *testing.T) {
 func TestPipelineRollsBackAfterExhaustion(t *testing.T) {
 	rolled := false
 	p := Pipeline{Worker: &fakeAgent{}, Verifier: &fakeVerifier{failures: 10}, MaxRetries: 1, SkipReview: true, Rollback: func(context.Context) error { rolled = true; return nil }}
-	if _, err := p.Run(context.Background(), "work"); err == nil {
+	_, err := p.Run(context.Background(), "work")
+	if err == nil {
 		t.Fatal("expected failure")
+	}
+	var stageErr *StageError
+	if !errors.As(err, &stageErr) || stageErr.Stage != "verification" {
+		t.Fatalf("Run error stage = %#v, want \"verification\"", stageErr)
 	}
 	if !rolled {
 		t.Fatal("rollback was not called")
@@ -294,8 +303,13 @@ func TestPipelineReviewFailureRollsBack(t *testing.T) {
 		Verifier: &fakeVerifier{}, Diff: fakeDiff{},
 		Rollback: func(context.Context) error { rolled = true; return nil },
 	}
-	if _, err := p.Run(context.Background(), "work"); err == nil || !strings.Contains(err.Error(), "review failed") {
+	_, err := p.Run(context.Background(), "work")
+	if err == nil || !strings.Contains(err.Error(), "review failed") {
 		t.Fatalf("Run error = %v", err)
+	}
+	var stageErr *StageError
+	if !errors.As(err, &stageErr) || stageErr.Stage != "review" {
+		t.Fatalf("Run error stage = %#v, want \"review\"", stageErr)
 	}
 	if !rolled {
 		t.Fatal("rollback was not called")
@@ -323,11 +337,32 @@ func TestPipelineReviewRegressionRollsBack(t *testing.T) {
 		Worker: &fakeAgent{}, Reviewer: &fakeAgent{}, Verifier: verify, Diff: fakeDiff{},
 		Rollback: func(context.Context) error { rolled = true; return nil },
 	}
-	if _, err := p.Run(context.Background(), "work"); err == nil || !strings.Contains(err.Error(), "review introduced") {
+	_, err := p.Run(context.Background(), "work")
+	if err == nil || !strings.Contains(err.Error(), "review introduced") {
 		t.Fatalf("Run error = %v", err)
+	}
+	var stageErr *StageError
+	if !errors.As(err, &stageErr) || stageErr.Stage != "review-regression" {
+		t.Fatalf("Run error stage = %#v, want \"review-regression\"", stageErr)
 	}
 	if !rolled {
 		t.Fatal("rollback was not called")
+	}
+}
+
+func TestPipelineRollbackFailureIsReportedDistinctly(t *testing.T) {
+	rollbackCause := errors.New("git reset failed")
+	p := Pipeline{
+		Worker: &fakeAgent{}, Verifier: &fakeVerifier{failures: 10}, MaxRetries: 0, SkipReview: true,
+		Rollback: func(context.Context) error { return rollbackCause },
+	}
+	_, err := p.Run(context.Background(), "work")
+	var rollbackErr *RollbackFailedError
+	if !errors.As(err, &rollbackErr) {
+		t.Fatalf("Run error = %v, want *RollbackFailedError", err)
+	}
+	if rollbackErr.Cause == nil || rollbackErr.Rollback != rollbackCause {
+		t.Fatalf("RollbackFailedError = %#v", rollbackErr)
 	}
 }
 

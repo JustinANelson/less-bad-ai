@@ -53,16 +53,16 @@ func (p *Pipeline) Run(ctx context.Context, prompt string) (Result, error) {
 		return result, fmt.Errorf("pipeline requires worker and verifier")
 	}
 	if !p.SkipReview && p.Reviewer == nil {
-		return result, p.fail(ctx, fmt.Errorf("pipeline requires reviewer unless review is explicitly skipped"))
+		return result, p.fail(ctx, "config", fmt.Errorf("pipeline requires reviewer unless review is explicitly skipped"))
 	}
 	if !p.SkipReview && p.Diff == nil {
-		return result, p.fail(ctx, fmt.Errorf("pipeline requires diff source for review"))
+		return result, p.fail(ctx, "config", fmt.Errorf("pipeline requires diff source for review"))
 	}
 	p.progress("1/4", "Worker generating code...")
 	summary, err := p.Worker.Run(ctx, prompt)
 	result.WorkerSummary = truncate(summary, 8192)
 	if err != nil {
-		return result, p.fail(ctx, fmt.Errorf("worker failed: %w", err))
+		return result, p.fail(ctx, "worker", fmt.Errorf("worker failed: %w", err))
 	}
 	max := p.MaxRetries
 	if max < 0 {
@@ -90,9 +90,9 @@ func (p *Pipeline) Run(ctx context.Context, prompt string) (Result, error) {
 		}
 		if attempt >= max {
 			if noOp {
-				return result, p.fail(ctx, fmt.Errorf("worker made no changes after %d attempt(s); nothing to verify or commit", attempt+1))
+				return result, p.fail(ctx, "no-op", fmt.Errorf("worker made no changes after %d attempt(s); nothing to verify or commit", attempt+1))
 			}
-			return result, p.fail(ctx, fmt.Errorf("verification failed after %d corrections: %w\n%s", attempt, verifyErr, diagnostics))
+			return result, p.fail(ctx, "verification", fmt.Errorf("verification failed after %d corrections: %w\n%s", attempt, verifyErr, diagnostics))
 		}
 		result.Retries++
 		var correction string
@@ -103,20 +103,20 @@ func (p *Pipeline) Run(ctx context.Context, prompt string) (Result, error) {
 			if p.Diff != nil {
 				diff, err = p.Diff.Diff(ctx)
 				if err != nil {
-					return result, p.fail(ctx, fmt.Errorf("read diff for correction %d: %w", attempt+1, err))
+					return result, p.fail(ctx, "verification", fmt.Errorf("read diff for correction %d: %w", attempt+1, err))
 				}
 			}
 			correction = fmt.Sprintf("Original objective:\n%s\n\nAttempt %d verification failed. Correct the worktree using these exact diagnostics:\n%s\n%v\n\nCurrent diff:\n%s\n\nModify only files inside the active repository.", truncate(prompt, 100000), attempt+1, truncate(diagnostics, 100000), verifyErr, truncate(diff, 100000))
 		}
 		if _, err := p.Worker.Run(ctx, correction); err != nil {
-			return result, p.fail(ctx, fmt.Errorf("correction %d failed: %w", attempt+1, err))
+			return result, p.fail(ctx, "worker", fmt.Errorf("correction %d failed: %w", attempt+1, err))
 		}
 	}
 	if !p.SkipReview {
 		p.progress("3/4", "Running Tech Lead cleanup...")
 		diff, err := p.Diff.Diff(ctx)
 		if err != nil {
-			return result, p.fail(ctx, err)
+			return result, p.fail(ctx, "review", err)
 		}
 		reviewPrompt := TechLeadPrompt
 		if p.ProjectContext != "" {
@@ -125,14 +125,14 @@ func (p *Pipeline) Run(ctx context.Context, prompt string) (Result, error) {
 		result.ReviewerSummary, err = p.Reviewer.Run(ctx, reviewPrompt+"\n\nApply necessary edits directly to the worktree.\n\n"+truncate(diff, 100000))
 		result.ReviewerSummary = truncate(result.ReviewerSummary, 8192)
 		if err != nil {
-			return result, p.fail(ctx, fmt.Errorf("review failed: %w", err))
+			return result, p.fail(ctx, "review", fmt.Errorf("review failed: %w", err))
 		}
 		if err := validateReviewSummary(result.ReviewerSummary); err != nil {
-			return result, p.fail(ctx, err)
+			return result, p.fail(ctx, "review", err)
 		}
 		p.runFormat(ctx, &result)
 		if diag, err := p.Verifier.Verify(ctx); err != nil {
-			return result, p.fail(ctx, fmt.Errorf("review introduced verification failure: %w\n%s", err, diag))
+			return result, p.fail(ctx, "review-regression", fmt.Errorf("review introduced verification failure: %w\n%s", err, diag))
 		}
 		result.Reviewed = true
 	}
@@ -175,16 +175,17 @@ func validateReviewSummary(summary string) error {
 	}
 	return nil
 }
-func (p *Pipeline) fail(ctx context.Context, cause error) error {
+func (p *Pipeline) fail(ctx context.Context, stage string, cause error) error {
+	tagged := &StageError{Stage: stage, Err: cause}
 	if p.Rollback == nil {
-		return cause
+		return tagged
 	}
 	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	if err := p.Rollback(rollbackCtx); err != nil {
-		return fmt.Errorf("%v; automatic rollback also failed: %w", cause, err)
+		return &RollbackFailedError{Cause: tagged, Rollback: err}
 	}
-	return cause
+	return tagged
 }
 func (p *Pipeline) progress(step, msg string) {
 	if p.Progress != nil {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -236,6 +237,53 @@ func TestWithProjectContextPrependsMemoryWithoutMutatingRawPrompt(t *testing.T) 
 	got := withProjectContext("add validation", "## Recent project decisions\n\n- used gofmt")
 	if !strings.Contains(got, "used gofmt") || !strings.Contains(got, "add validation") {
 		t.Fatalf("expected augmented prompt to contain both memory and the raw task, got %q", got)
+	}
+}
+
+func TestCalmMessageHidesDetailUnlessVerbose(t *testing.T) {
+	cause := errors.New("check \"test\": go test failed: exit status 1\nFAIL example.com/project 0.01s")
+	quiet := calmMessage("the generated change did not pass verification.", cause, false).Error()
+	if !strings.Contains(quiet, "the generated change did not pass verification.") || !strings.Contains(quiet, "restored") || !strings.Contains(quiet, "--verbose") {
+		t.Fatalf("quiet message missing reason/reassurance/hint: %q", quiet)
+	}
+	if strings.Contains(quiet, "FAIL example.com/project") {
+		t.Fatalf("quiet message leaked full detail: %q", quiet)
+	}
+	loud := calmMessage("the generated change did not pass verification.", cause, true).Error()
+	if !strings.Contains(loud, "FAIL example.com/project") {
+		t.Fatalf("verbose message did not include full detail: %q", loud)
+	}
+}
+
+func TestRecoveryMessageAlwaysShowsFullDetail(t *testing.T) {
+	cause := &runner.RollbackFailedError{Cause: errors.New("verification failed"), Rollback: errors.New("git reset failed: dubious ownership")}
+	got := recoveryMessage(cause).Error()
+	for _, want := range []string{"do NOT run", "lbai status", "git reset failed: dubious ownership"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("recovery message missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestReportPipelineFailureClassifiesByStage(t *testing.T) {
+	noOp := reportPipelineFailure(&runner.StageError{Stage: "no-op", Err: errors.New("worker made no changes")}, false).Error()
+	if !strings.Contains(noOp, "the coding agent made no changes.") {
+		t.Fatalf("expected the no-op stage reason, got %q", noOp)
+	}
+	if strings.Contains(noOp, "do NOT run") {
+		t.Fatalf("a plain stage failure must not trigger recovery guidance: %q", noOp)
+	}
+
+	untagged := reportPipelineFailure(errors.New("something unexpected"), false).Error()
+	if !strings.Contains(untagged, "the change could not be completed.") {
+		t.Fatalf("expected the generic fallback reason for an untagged error, got %q", untagged)
+	}
+
+	rollbackFailed := reportPipelineFailure(&runner.RollbackFailedError{Cause: errors.New("verification failed"), Rollback: errors.New("git reset failed")}, false).Error()
+	for _, want := range []string{"do NOT run", "git reset failed"} {
+		if !strings.Contains(rollbackFailed, want) {
+			t.Fatalf("expected recovery guidance for a rollback failure, missing %q: %q", want, rollbackFailed)
+		}
 	}
 }
 
