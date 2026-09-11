@@ -274,6 +274,11 @@ func TestReportPipelineFailureClassifiesByStage(t *testing.T) {
 		t.Fatalf("a plain stage failure must not trigger recovery guidance: %q", noOp)
 	}
 
+	timeout := reportPipelineFailure(&runner.StageError{Stage: "timeout", Err: errors.New("worker did not finish within 5m0s")}, false).Error()
+	if !strings.Contains(timeout, "the coding agent took too long and was stopped.") {
+		t.Fatalf("expected the timeout stage reason, got %q", timeout)
+	}
+
 	untagged := reportPipelineFailure(errors.New("something unexpected"), false).Error()
 	if !strings.Contains(untagged, "the change could not be completed.") {
 		t.Fatalf("expected the generic fallback reason for an untagged error, got %q", untagged)

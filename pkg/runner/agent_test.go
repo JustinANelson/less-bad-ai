@@ -7,10 +7,52 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
+
+// TestCommandAgentRunBoundsWaitDespiteOrphanedGrandchild locks in a fix
+// found via live testing: a shell-wrapper agent command (cmd /c, sh -c)
+// that spawns its own child to do the real work can leave that grandchild
+// running and holding the inherited stdout/stderr pipes open even after
+// the direct child is killed on cancellation. Without cmd.WaitDelay,
+// CombinedOutput blocks until the orphan exits on its own — silently
+// defeating any caller-configured timeout.
+func TestCommandAgentRunBoundsWaitDespiteOrphanedGrandchild(t *testing.T) {
+	var command []string
+	switch runtime.GOOS {
+	case "windows":
+		command = []string{"cmd.exe", "/c", "ping -n 30 127.0.0.1 >nul & rem"}
+	default:
+		if _, err := exec.LookPath("sh"); err != nil {
+			t.Skip("sh not available")
+		}
+		command = []string{"sh", "-c", "sleep 30 &"}
+	}
+	// Not t.TempDir(): the orphaned grandchild this test deliberately
+	// creates keeps the directory as its working directory for up to
+	// ~30s after the test returns, which would make Windows fail t's
+	// automatic cleanup. Best-effort remove it instead, ignoring errors.
+	root, err := os.MkdirTemp("", "lbai-orphan-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	agent := &CommandAgent{Root: root, Command: command}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := agent.Run(ctx, "prompt"); err == nil {
+		t.Fatal("expected the cancelled command to return an error")
+	}
+	if elapsed := time.Since(start); elapsed > commandWaitDelay+5*time.Second {
+		t.Fatalf("Run took %v, want it bounded by commandWaitDelay (%v) despite the orphaned grandchild", elapsed, commandWaitDelay)
+	}
+}
 
 func TestGitSafeDirectoryEnvPreservesExistingCommandConfig(t *testing.T) {
 	environ := []string{

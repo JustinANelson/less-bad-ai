@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/JustinANelson/less-bad-ai/pkg/gitengine"
 	"github.com/JustinANelson/less-bad-ai/pkg/linter"
@@ -166,6 +167,7 @@ func (a *app) runCommand() *cobra.Command {
 	var dry, skipReview, serve, verbose bool
 	var message, model string
 	var retries int
+	var agentTimeout time.Duration
 	c := &cobra.Command{Use: "run <prompt...>", Aliases: []string{"r", "exec"}, Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 		prompt := strings.Join(args, " ")
@@ -235,7 +237,7 @@ func (a *app) runCommand() *cobra.Command {
 			return text, nil
 		}})
 		verify := runner.GraphVerifier{Checks: verificationChecks}
-		pipeline := runner.Pipeline{Worker: worker, Reviewer: reviewer, Verifier: verify, Diff: runner.GitDiff{Root: root, Base: plan.Head}, MaxRetries: retries, SkipReview: skipReview, ProjectContext: projectContext, Format: runner.AutoFormat{Root: root}, Rollback: func(ctx context.Context) error { _, e := engine.Undo(ctx, false); return e }, Progress: func(step, msg string) { fmt.Fprintf(a.out, "[lbai] [%s] %s\n", step, msg) }}
+		pipeline := runner.Pipeline{Worker: worker, Reviewer: reviewer, Verifier: verify, Diff: runner.GitDiff{Root: root, Base: plan.Head}, MaxRetries: retries, SkipReview: skipReview, ProjectContext: projectContext, Format: runner.AutoFormat{Root: root}, AgentTimeout: agentTimeout, Rollback: func(ctx context.Context) error { _, e := engine.Undo(ctx, false); return e }, Progress: func(step, msg string) { fmt.Fprintf(a.out, "[lbai] [%s] %s\n", step, msg) }}
 		result, err := pipeline.Run(ctx, agentPrompt)
 		if err != nil {
 			return reportPipelineFailure(err, verbose)
@@ -268,6 +270,7 @@ func (a *app) runCommand() *cobra.Command {
 	c.Flags().StringVarP(&message, "message", "m", "", "override the generated commit message")
 	c.Flags().StringVar(&model, "model", "", "override the configured model")
 	c.Flags().IntVar(&retries, "max-retries", 3, "maximum worker correction attempts")
+	c.Flags().DurationVar(&agentTimeout, "agent-timeout", 5*time.Minute, "maximum time to wait for a single worker or reviewer call")
 	c.Flags().BoolVar(&skipReview, "skip-review", false, "skip the tech lead review")
 	c.Flags().BoolVar(&verbose, "verbose", false, "show full diagnostic detail on failure instead of a short summary")
 	c.Flags().BoolVar(&serve, "serve", false, "serve the topology dashboard after the run")
@@ -508,6 +511,7 @@ var stageReasons = map[string]string{
 	"review":            "the tech-lead review step failed.",
 	"review-regression": "the review step's own edits broke verification.",
 	"config":            "the transaction pipeline was misconfigured.",
+	"timeout":           "the coding agent took too long and was stopped.",
 }
 
 // reportPipelineFailure turns a Pipeline.Run error into a user-facing

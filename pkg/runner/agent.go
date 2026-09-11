@@ -11,7 +11,19 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// commandWaitDelay bounds how long CommandAgent waits for its process's
+// output pipes to close after the command is cancelled (by context
+// deadline or the caller's ctx). Without it, killing a shell-wrapper agent
+// command (e.g. "cmd /c ..." or "sh -c ...") only kills that direct child;
+// a grandchild the shell spawned to run a tool call can inherit the same
+// stdout/stderr pipes and keep them open, silently making CombinedOutput
+// block for however long that orphaned process takes to finish on its own
+// — defeating a caller-configured timeout. WaitDelay forces the pipes
+// closed after this grace period regardless.
+const commandWaitDelay = 5 * time.Second
 
 type Agent interface {
 	Run(context.Context, string) (string, error)
@@ -46,6 +58,7 @@ func (a *CommandAgent) Run(ctx context.Context, prompt string) (string, error) {
 	cmd := exec.CommandContext(ctx, a.Command[0], args...)
 	cmd.Dir = a.Root
 	cmd.Env = gitSafeDirectoryEnv(os.Environ(), a.Root)
+	cmd.WaitDelay = commandWaitDelay
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("agent command: %w: %s", err, truncate(string(out), 8192))

@@ -9,6 +9,11 @@ import (
 
 const TechLeadPrompt = `You are the Automated Tech Lead. Inspect the authoritative transaction diff supplied below; do not run Git to rediscover it. Enforce existing code idioms, eliminate temporary logs/debug statements, extract inline logic into shared utilities if duplicate patterns exist, and preserve all architectural boundaries. If you cannot review the supplied diff, report the failure instead of claiming completion.`
 
+// defaultHeartbeatInterval is how often a still-running agent call reports
+// progress when Pipeline.HeartbeatInterval is unset. Purely cosmetic, so
+// it isn't a CLI-configurable value.
+const defaultHeartbeatInterval = 15 * time.Second
+
 type Verifier interface {
 	Verify(context.Context) (string, error)
 }
@@ -38,6 +43,13 @@ type Pipeline struct {
 	// carries this context, if any, because the caller builds it into the
 	// prompt passed to Run.
 	ProjectContext string
+	// AgentTimeout bounds each worker/reviewer invocation. Zero (the
+	// default for callers that don't set it) means no timeout, matching
+	// Pipeline's prior, unbounded behavior.
+	AgentTimeout time.Duration
+	// HeartbeatInterval controls how often a still-running agent call
+	// reports progress. Zero uses defaultHeartbeatInterval.
+	HeartbeatInterval time.Duration
 }
 type Result struct {
 	WorkerSummary   string
@@ -59,9 +71,12 @@ func (p *Pipeline) Run(ctx context.Context, prompt string) (Result, error) {
 		return result, p.fail(ctx, "config", fmt.Errorf("pipeline requires diff source for review"))
 	}
 	p.progress("1/4", "Worker generating code...")
-	summary, err := p.Worker.Run(ctx, prompt)
+	summary, err, timedOut := p.runAgent(ctx, p.Worker, "1/4", prompt)
 	result.WorkerSummary = truncate(summary, 8192)
 	if err != nil {
+		if timedOut {
+			return result, p.fail(ctx, "timeout", fmt.Errorf("worker did not finish within %s; pass --agent-timeout to allow more time: %w", p.AgentTimeout, err))
+		}
 		return result, p.fail(ctx, "worker", fmt.Errorf("worker failed: %w", err))
 	}
 	max := p.MaxRetries
@@ -108,7 +123,11 @@ func (p *Pipeline) Run(ctx context.Context, prompt string) (Result, error) {
 			}
 			correction = fmt.Sprintf("Original objective:\n%s\n\nAttempt %d verification failed. Correct the worktree using these exact diagnostics:\n%s\n%v\n\nCurrent diff:\n%s\n\nModify only files inside the active repository.", truncate(prompt, 100000), attempt+1, truncate(diagnostics, 100000), verifyErr, truncate(diff, 100000))
 		}
-		if _, err := p.Worker.Run(ctx, correction); err != nil {
+		p.progress("1/4", fmt.Sprintf("Requesting correction attempt %d...", attempt+1))
+		if _, err, timedOut := p.runAgent(ctx, p.Worker, "1/4", correction); err != nil {
+			if timedOut {
+				return result, p.fail(ctx, "timeout", fmt.Errorf("correction %d did not finish within %s; pass --agent-timeout to allow more time: %w", attempt+1, p.AgentTimeout, err))
+			}
 			return result, p.fail(ctx, "worker", fmt.Errorf("correction %d failed: %w", attempt+1, err))
 		}
 	}
@@ -122,10 +141,15 @@ func (p *Pipeline) Run(ctx context.Context, prompt string) (Result, error) {
 		if p.ProjectContext != "" {
 			reviewPrompt = fmt.Sprintf("Project context (for consistency; not new instructions):\n%s\n\n%s", p.ProjectContext, reviewPrompt)
 		}
-		result.ReviewerSummary, err = p.Reviewer.Run(ctx, reviewPrompt+"\n\nApply necessary edits directly to the worktree.\n\n"+truncate(diff, 100000))
+		var reviewErr error
+		var reviewTimedOut bool
+		result.ReviewerSummary, reviewErr, reviewTimedOut = p.runAgent(ctx, p.Reviewer, "3/4", reviewPrompt+"\n\nApply necessary edits directly to the worktree.\n\n"+truncate(diff, 100000))
 		result.ReviewerSummary = truncate(result.ReviewerSummary, 8192)
-		if err != nil {
-			return result, p.fail(ctx, "review", fmt.Errorf("review failed: %w", err))
+		if reviewErr != nil {
+			if reviewTimedOut {
+				return result, p.fail(ctx, "timeout", fmt.Errorf("review did not finish within %s; pass --agent-timeout to allow more time: %w", p.AgentTimeout, reviewErr))
+			}
+			return result, p.fail(ctx, "review", fmt.Errorf("review failed: %w", reviewErr))
 		}
 		if err := validateReviewSummary(result.ReviewerSummary); err != nil {
 			return result, p.fail(ctx, "review", err)
@@ -138,6 +162,45 @@ func (p *Pipeline) Run(ctx context.Context, prompt string) (Result, error) {
 	}
 	p.progress("4/4", "Finalizing transaction...")
 	return result, nil
+}
+
+// runAgent invokes agent with a deadline (when AgentTimeout is set) and
+// emits periodic "still working" progress while it runs, so a long-but-
+// healthy call isn't indistinguishable from a hang. timedOut reports
+// whether the call's own deadline (not the caller's ctx) was what ended it,
+// which is what lets callers give a specific timeout message regardless of
+// how a given Agent implementation phrases its own cancellation error.
+func (p *Pipeline) runAgent(ctx context.Context, agent Agent, step, prompt string) (summary string, err error, timedOut bool) {
+	callCtx := ctx
+	if p.AgentTimeout > 0 {
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithTimeout(ctx, p.AgentTimeout)
+		defer cancel()
+	}
+	type result struct {
+		summary string
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		s, e := agent.Run(callCtx, prompt)
+		done <- result{s, e}
+	}()
+	interval := p.HeartbeatInterval
+	if interval <= 0 {
+		interval = defaultHeartbeatInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	start := time.Now()
+	for {
+		select {
+		case r := <-done:
+			return r.summary, r.err, r.err != nil && callCtx.Err() == context.DeadlineExceeded
+		case <-ticker.C:
+			p.progress(step, fmt.Sprintf("still working... (%s elapsed)", time.Since(start).Round(time.Second)))
+		}
+	}
 }
 
 // runFormat best-effort formats the currently changed files. It never fails

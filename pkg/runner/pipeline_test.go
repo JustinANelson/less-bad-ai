@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeAgent struct {
@@ -392,5 +393,65 @@ func TestPipelineCancellationUsesFreshRollbackContext(t *testing.T) {
 	}
 	if !rolled {
 		t.Fatal("rollback was not called")
+	}
+}
+
+func TestPipelineTimesOutSlowWorker(t *testing.T) {
+	rolled := false
+	p := Pipeline{
+		Worker: cancellingAgent{}, Verifier: &fakeVerifier{}, SkipReview: true,
+		AgentTimeout: 20 * time.Millisecond,
+		Rollback:     func(context.Context) error { rolled = true; return nil },
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := p.Run(ctx, "work")
+	var stageErr *StageError
+	if !errors.As(err, &stageErr) || stageErr.Stage != "timeout" {
+		t.Fatalf("Run error stage = %#v (err=%v), want \"timeout\"", stageErr, err)
+	}
+	if !rolled {
+		t.Fatal("rollback was not called")
+	}
+}
+
+type sleepyAgent struct{ sleep time.Duration }
+
+func (a sleepyAgent) Run(context.Context, string) (string, error) {
+	time.Sleep(a.sleep)
+	return "summary", nil
+}
+
+func TestPipelineEmitsHeartbeatDuringLongAgentCall(t *testing.T) {
+	var messages []string
+	p := Pipeline{
+		Worker: sleepyAgent{sleep: 30 * time.Millisecond}, Verifier: &fakeVerifier{}, SkipReview: true,
+		HeartbeatInterval: 10 * time.Millisecond,
+		Progress:          func(_, msg string) { messages = append(messages, msg) },
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := p.Run(ctx, "work"); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range messages {
+		if strings.Contains(m, "still working") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected a heartbeat message during a long agent call, got %v", messages)
+	}
+}
+
+func TestPipelineZeroAgentTimeoutIsUnbounded(t *testing.T) {
+	// A Pipeline that never sets AgentTimeout (the zero value) must behave
+	// exactly as it did before this field existed: no deadline is ever
+	// applied to an agent call.
+	p := Pipeline{Worker: &fakeAgent{}, Verifier: &fakeVerifier{}, SkipReview: true}
+	if _, err := p.Run(context.Background(), "work"); err != nil {
+		t.Fatal(err)
 	}
 }

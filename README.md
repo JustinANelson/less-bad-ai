@@ -118,6 +118,18 @@ change or explain why none is needed, instead of immediately failing the
 transaction. This absorbs one-off agent flakiness invisibly; only a worker
 that produces no changes across every retry attempt fails the run.
 
+Every worker and reviewer call is bounded by `--agent-timeout` (default
+5m); a call that runs long reports periodic `still working...` progress
+rather than sitting silent, and one that exceeds the timeout is stopped and
+reported through the same calm failure message as any other stage. For
+command-based providers, this bound holds even when the configured command
+is a shell wrapper (`cmd /c ...`, `sh -c ...`) that spawns its own child
+process to do the real work: killing the direct child alone can leave a
+grandchild running and silently holding the output pipes open past the
+deadline, so `lbai` forces those pipes closed on a short grace period after
+cancellation, bounding total wait time regardless of what the agent's own
+subprocess tree is doing.
+
 Review is fail-closed by default: a run requires a configured reviewer and a
 readable transaction diff, and reviewer output that reports a Git inspection
 failure rolls the transaction back. Use `--skip-review` to deliberately omit
